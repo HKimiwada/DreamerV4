@@ -5,6 +5,9 @@ Overview:
     2. Stadardize data (resize, normalize, clip into sequences)
     3. Patchify and mask frames for masked-autoencoding training.
     4. Store or Stream batches efficiently for tokenizer.
+
+Classes:
+    VideoLoader: Load and preprocess video clips from raw .mp4 files.
 """
 import os
 from pathlib import Path
@@ -15,6 +18,11 @@ import torchvision.transforms.functional as F  # optional
 from PIL import Image
 
 class VideoLoader:
+    """
+    Input raw mp4 video files from a directory, sample frames at target fps, resize frames, and return as tensor clips.
+    [Frame, 3 (number of channels RGB), Height, Width]
+    """
+
     def __init__(self, 
                 video_dir: Path, 
                 target_fps: float = 20.0, 
