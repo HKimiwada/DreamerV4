@@ -31,16 +31,29 @@ def get_free_space_gb(path="."):
     total, used, free = shutil.disk_usage(path)
     return free / (1024**3)
 
-def download_one_file(filename: str, dest_path: Path):
-    """Download a single file from the HF hub and move it to dest_path."""
-    local_path = hf_hub_download(
-        repo_id=REPO_ID,
-        filename=filename,
-        repo_type=REPO_TYPE,
-        token=HF_TOKEN
-    )
-    shutil.copy(local_path, dest_path)
-    print(f"[DOWNLOADED] {filename} → {dest_path}")
+def download_one_file(filename: str, dest_path: Path, max_retries: int = 5):
+    """Download a single file from the HF hub with retries.
+       Skips file permanently if all retries fail."""
+    for attempt in range(max_retries):
+        try:
+            local_path = hf_hub_download(
+                repo_id=REPO_ID,
+                filename=filename,
+                repo_type=REPO_TYPE,
+                token=HF_TOKEN
+            )
+            shutil.copy(local_path, dest_path)
+            print(f"[DOWNLOADED] {filename} → {dest_path}")
+            return True  # success
+        except Exception as e:
+            wait = 10 * (2 ** attempt)
+            print(f"[WARN] Download failed ({attempt+1}/{max_retries}) for {filename}: {e}")
+            if attempt < max_retries - 1:
+                print(f"[INFO] Retrying in {wait}s…")
+                time.sleep(wait)
+            else:
+                print(f"[ERROR] Skipping {filename} after {max_retries} failed attempts.")
+                return False  # failed permanently
 
 def list_repo_files_with_retry(api, repo_id, repo_type, max_retries=5):
     """List repo files with retry logic."""
@@ -79,8 +92,13 @@ def main():
         vid_dest = OUT_DIR / Path(vid).name
         act_dest = OUT_DIR / Path(act).name
 
-        download_one_file(vid, vid_dest)
-        download_one_file(act, act_dest)
+        ok_vid = download_one_file(vid, vid_dest)
+        ok_act = download_one_file(act, act_dest)
+
+        # Skip size counting if either failed
+        if not (ok_vid and ok_act):
+            print(f"[WARN] Skipped pair {vid} / {act} due to download failure.")
+            continue
 
         size_vid = vid_dest.stat().st_size
         size_act = act_dest.stat().st_size
