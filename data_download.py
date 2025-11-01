@@ -18,7 +18,7 @@ os.environ["HF_HUB_READ_TIMEOUT"] = "300"
 # Config
 REPO_ID = "zhwang4ai/OpenAI-Minecraft-Contractor"
 REPO_TYPE = "dataset"
-OUT_DIR = Path("vpt_mvs")
+OUT_DIR = Path("data")
 SIZE_LIMIT_GB = 40
 SIZE_LIMIT = SIZE_LIMIT_GB * (1024 ** 3)
 
