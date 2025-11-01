@@ -1,8 +1,8 @@
 """
 Data preprocessing pipeline: convert raw VPT gameplay into tensor clips that can be used to train causal tokenizer. 
 Overview:
-    1. Load raw VPT gameplay data from disk.
-    2. Stadardize data (resize, normalize, clip into sequences)
+    1. Load raw VPT gameplay data from disk and convert to tensors. (dataset.py -> VideoLoader)
+    2. Stadardize tensors (resize, normalize, clip into sequences).
     3. Patchify and mask frames for masked-autoencoding training.
     4. Store or Stream batches efficiently for tokenizer.
 
@@ -14,18 +14,20 @@ from pathlib import Path
 import numpy as np
 import torch
 from decord import VideoReader, cpu
-import torchvision.transforms.functional as F  # optional
+import torchvision.transforms.functional as F  
 from PIL import Image
 
 class VideoLoader:
     """
     Input raw mp4 video files from a directory, sample frames at target fps, resize frames, and return as tensor clips.
-    [Frame, 3 (number of channels RGB), Height, Width]
+    [Frame, 3 (number of channels RGB), Height, Width] -> Creates full frame tensor for entire clip of video.
 
     Video 1:
         Frames shape: torch.Size([64, 3, 384, 640])
         Metadata: {'video_id': 'cheeky-cornflower-setter-8106e54c1f1d-20220420-205328', 'orig_frame_count': 64, 'clip_length': 64}
-    Testing loader with max_frames=64 for video index 2
+    Testing loader with max_frames=64 for video index 
+    
+    Outputs of VideoLoader will be fed into TemporalSlicer to create shorter clips for training.
     """
 
     def __init__(self, 

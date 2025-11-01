@@ -16,7 +16,7 @@ for idx in range(3):
     print(f"  Metadata: {metadata}")
 
 for idx in range(3):
-    frames, metadata = loader[idx]
+    frames, metadata = loader_v2[idx]
     print(f"Testing loader with max_frames=None for video index {idx}")
     print(f"Video {idx}:")
     print(f"  Frames shape: {frames.shape}")
