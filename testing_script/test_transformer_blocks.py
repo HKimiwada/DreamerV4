@@ -1,4 +1,4 @@
-# python testing_code/test_transformer_blocks.py
+# python testing_script/test_transformer_blocks.py
 import torch
 from tokenizer.model.transformer_blocks import RMSNorm
 from tokenizer.model.transformer_blocks import BlockCausalTransformer

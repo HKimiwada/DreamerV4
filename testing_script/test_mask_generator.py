@@ -1,4 +1,4 @@
-# python testing_code/test_mask_generator.py
+# python testing_script/test_mask_generator.py
 import torch
 from tokenizer.patchify_mask import MaskGenerator
 

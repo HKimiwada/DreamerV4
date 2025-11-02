@@ -1,4 +1,4 @@
-# python testing_code/test_tokenizer_dataset.py
+# python testing_script/test_tokenizer_dataset.py
 from pathlib import Path
 import torch
 from tokenizer.tokenizer_dataset import TokenizerDataset

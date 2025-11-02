@@ -1,4 +1,4 @@
-# python testing_code/test_temporal_splicer.py
+# python testing_script/test_temporal_splicer.py
 from pathlib import Path
 from tokenizer.dataset import VideoLoader
 from tokenizer.temporal_slicer import TemporalSlicer

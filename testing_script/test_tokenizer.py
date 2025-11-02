@@ -1,4 +1,4 @@
-# python testing_code/test_tokenizer.py
+# python testing_script/test_tokenizer.py
 import torch
 from tokenizer.model.encoder_decoder import CausalTokenizer
 

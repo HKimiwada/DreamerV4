@@ -1,4 +1,4 @@
-# python testing_code/test_patchify.py      
+# python testing_script/test_patchify.py      
 from tokenizer.patchify_mask import Patchifier
 import torch
 import einops

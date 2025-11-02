@@ -1,4 +1,4 @@
-# python testing_code/test_videoloader.py
+# python testing_script/test_videoloader.py
 from pathlib import Path
 from tokenizer.dataset import VideoLoader
 import numpy as np
