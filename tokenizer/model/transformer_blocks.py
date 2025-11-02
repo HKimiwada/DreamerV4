@@ -47,6 +47,10 @@ def causal_masking_function(seq_len):
     return mask  # Shape: (seq_len, seq_len)
 
 class MultiHeadAttention(nn.Module):
+    """
+    Multi-Head Attention module with optional causal masking 
+    (causal: by toggling on can mask future frames, by toggling off can disable masking when looking at one frame).
+    """
     def __init__(self, input_size, num_heads, causal: bool, causal_masking_function):
         super(MultiHeadAttention, self).__init__()
         assert input_size % num_heads == 0 , "input_size must be divisible by num_heads"
@@ -81,3 +85,10 @@ class MultiHeadAttention(nn.Module):
         attn_output = attn_output.view(batch_size, seq_len, -1)  # (batch_size, seq_len, input_size)
         attn_output = self.dropout(self.w_out(attn_output))
         return attn_output
+
+class BlockCausalTransformer(nn.Module):
+    def __init__(self, input_size, num_heads, hidden_size, causal: bool, causal_masking_function):
+        super(BlockCausalTransformer, self).__init__()
+       
+    def forward(self, x):
+        pass
