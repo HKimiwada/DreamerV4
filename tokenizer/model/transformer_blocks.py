@@ -18,3 +18,14 @@ class RMSNorm(nn.Module):
         x_normed = x / torch.sqrt(ms + self.eps)
         output = x_normed * self.scale
         return output
+
+class FeedForward(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size):
+        super(FeedForward, self).__init__()
+        # 全結合層の定義
+        self.fc1 = nn.Linear(input_size, hidden_size)
+        self.relu = nn.ReLU()
+        self.fc2 = nn.Linear(hidden_size, output_size)
+    
+    def forward(self, x):
+        pass
