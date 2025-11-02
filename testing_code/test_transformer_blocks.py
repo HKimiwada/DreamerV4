@@ -2,7 +2,6 @@
 import torch
 from tokenizer.model.transformer_blocks import RMSNorm
 from tokenizer.model.transformer_blocks import BlockCausalTransformer
-from tokenizer.model.transformer_blocks import causal_masking_function
 
 x = torch.randn(2, 5, 4)
 norm = RMSNorm(4)
@@ -22,6 +21,6 @@ print(y.std(-1))      # roughly 1 * scale
 
 print("\nTesting BlockCausalTransformer:")
 x = torch.randn(2, 64, 768)
-block = BlockCausalTransformer(768, num_heads=8, causal_time=True, causal_masking_function=causal_masking_function)
+block = BlockCausalTransformer(768, num_heads=8, causal_time=True)
 y = block(x)
 print(y.shape)   # torch.Size([2, 64, 768])

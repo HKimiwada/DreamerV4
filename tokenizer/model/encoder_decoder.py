@@ -12,4 +12,20 @@ Conceptual Overview:
     4. Stack of spatial + temporal blocks (decoder)
     5. Linear projection 
     6. Output (reconstructed patches)
+
+Imports — bring in BlockCausalTransformer, torch.nn as nn.
+Define class CausalTokenizer(nn.Module)
+In __init__:
+    Create mask_token (nn.Parameter)
+    Build encoder stack (ModuleList)
+    Build decoder stack (ModuleList)
+    Add latent projection layers (Linear + Tanh)
+    Add output projection (Linear)
+In forward():
+    Replace masked tokens.
+    Pass through encoder → latent → decoder.
+    Return reconstructed patches (and optionally latents).
 """
+import torch
+import torch.nn as nn
+from tokenizer.model.transformer_blocks import BlockCausalTransformer

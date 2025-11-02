@@ -38,21 +38,12 @@ class FeedForward(nn.Module):
         x = self.dropout(self.down(x))
         return x
 
-def causal_masking_function(seq_len):
-    """
-    Small helper function used in temporal attention layers.
-    Creates mask that ensures the model only attends to past (and current) time step frames.
-    """
-    # Create a causal mask for attention
-    mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool))
-    return mask  # Shape: (seq_len, seq_len)
-
 class MultiHeadAttention(nn.Module):
     """
     Multi-Head Attention module with optional causal masking 
     (causal: by toggling on can mask future frames, by toggling off can disable masking when looking at one frame).
     """
-    def __init__(self, input_size, num_heads, causal: bool, causal_masking_function):
+    def __init__(self, input_size, num_heads, causal: bool):
         super().__init__()
         assert input_size % num_heads == 0 , "input_size must be divisible by num_heads"
         self.num_heads = num_heads
@@ -63,7 +54,15 @@ class MultiHeadAttention(nn.Module):
         self.w_out = nn.Linear(input_size, input_size) # Output projection
         self.dropout = nn.Dropout(0.1)
         self.causal = causal # whether to apply temporal causal masking (not allow model to attend future frames)
-        self.causal_masking_function = causal_masking_function
+  
+    def _causal_masking_function(self, seq_len):
+        """
+        Small helper function used in temporal attention layers.
+        Creates mask that ensures the model only attends to past (and current) time step frames.
+        """
+        # Create a causal mask for attention
+        mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool))
+        return mask  # Shape: (seq_len, seq_len)
 
     def forward(self, x):
         batch_size, seq_len, _ = x.size()
@@ -78,7 +77,7 @@ class MultiHeadAttention(nn.Module):
         # Scaled dot-product attention
         scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.head_dim)
         if self.causal:
-            mask = self.causal_masking_function(seq_len).to(x.device)  # (seq_len, seq_len)
+            mask = self._causal_masking_function(seq_len).to(x.device)  # (seq_len, seq_len)
             scores = scores.masked_fill(mask.unsqueeze(0).unsqueeze(0) == 0, float('-inf'))
         attn_weights = F.softmax(scores, dim=-1)
         attn_output = torch.matmul(attn_weights, V)  # (batch_size, num_heads, seq_len, head_dim)
@@ -105,11 +104,11 @@ class BlockCausalTransformer(nn.Module):
         3 spatial blocks (causal_time=False)
         1 temporal block (causal_time=True)
     """
-    def __init__(self, input_size, num_heads, causal_time: bool, causal_masking_function):
+    def __init__(self, input_size, num_heads, causal_time: bool):
         super().__init__()
         self.norm1 = RMSNorm(input_size)
         self.norm2 = RMSNorm(input_size)
-        self.attn = MultiHeadAttention(input_size, num_heads, causal_time, causal_masking_function)
+        self.attn = MultiHeadAttention(input_size, num_heads, causal_time)
         self.ffn = FeedForward(input_size, hidden_size=int(4*input_size))
        
     def forward(self, x):
