@@ -1,8 +1,8 @@
 """
 wandb login
-PYTHONPATH=. python training_script/train_tokenizer.py
+torchrun --nproc_per_node=8 PYTHONPATH=. training_script/train_tokenizer.py
 Overview of Training script for tokenizer:
-    1. Load video patch data from your preprocessed dataset (TokenizerDataset).
+    1. Load video patch data from your preprocessed dataset (TokenizerDatasetDDP).
     2. Feed it into the tokenizer (encoder–decoder).
     3. Compute the reconstruction loss (MSE + 0.2×LPIPS) only on masked patches.
     4. Backpropagate, optimize, and log training metrics to wandb.
@@ -14,172 +14,141 @@ compact latents for the world model.
 import os
 from pathlib import Path
 import torch
+import torch.distributed as dist
+from torch import amp
 from torch.optim import AdamW
-from torch.cuda.amp import GradScaler, autocast
+from torch.utils.data import DataLoader, DistributedSampler
 from tqdm import tqdm
 import wandb
 
-from tokenizer.tokenizer_dataset import TokenizerDataset
+from tokenizer.tokenizer_dataset import TokenizerDatasetDDP
 from tokenizer.model.encoder_decoder import CausalTokenizer
 from tokenizer.losses import CombinedLoss
 
-
 # ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
-
 class TrainConfig:
-    # Data
     data_dir = Path("data")
     resize = (384, 640)
     patch_size = 16
-    clip_length = 64
-    batch_size = 2  # dataset yields one clip, treat as batch=1
+    clip_length = 32
+    batch_size = 1
     num_workers = 2
-
-    # Model
     input_dim = 3 * patch_size * patch_size
-    embed_dim = 768
+    embed_dim = 512
     latent_dim = 256
     num_heads = 8
-    num_layers = 12
-
-    # Optimization
+    num_layers = 8
     lr = 1e-4
     weight_decay = 0.05
     max_epochs = 5
     log_interval = 25
+    accumulation_steps = 8
     ckpt_dir = Path("checkpoints")
-
-    # Loss
-    alpha = 0.2  # LPIPS weighting
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    # WandB
+    alpha = 0.2
     project = "DreamerV4-tokenizer"
-    entity = "hiroki-kimiwada-"   # ← remove trailing dash
-    run_name = "tokenizer_v4_lpips"
+    entity = "hiroki-kimiwada-"     # stays as provided
+    run_name = "tokenizer_v4_lpips_ddp"
 
 # ---------------------------------------------------------------------------
-# Utilities
-# ---------------------------------------------------------------------------
-
-def save_checkpoint(model, optimizer, epoch, loss_dict, cfg: TrainConfig):
+def save_checkpoint(model, optimizer, epoch, cfg, rank):
+    if rank != 0:
+        return
     cfg.ckpt_dir.mkdir(parents=True, exist_ok=True)
-    path = cfg.ckpt_dir / f"tokenizer_epoch{epoch:03d}.pt"
+    ckpt_path = cfg.ckpt_dir / f"tokenizer_epoch{epoch:03d}.pt"
     torch.save({
-        "model": model.state_dict(),
-        "optimizer": optimizer.state_dict(),
+        "model_state": model.module.state_dict() if hasattr(model, "module") else model.state_dict(),
+        "optimizer_state": optimizer.state_dict(),
         "epoch": epoch,
-        "loss": loss_dict,
-    }, path)
-    print(f"[Checkpoint] Saved → {path}")
-    wandb.save(str(path))
-
+    }, ckpt_path)
+    print(f"[Checkpoint] Saved → {ckpt_path}")
+    artifact = wandb.Artifact(f"tokenizer-epoch{epoch:03d}", type="model", metadata={"epoch": epoch})
+    artifact.add_file(str(ckpt_path))
+    wandb.log_artifact(artifact)
 
 # ---------------------------------------------------------------------------
-# Main training loop
-# ---------------------------------------------------------------------------
+def main():
+    dist.init_process_group(backend="nccl")
+    local_rank = int(os.environ["LOCAL_RANK"])
+    torch.cuda.set_device(local_rank)
+    device = torch.device(f"cuda:{local_rank}")
 
-def train_tokenizer():
     cfg = TrainConfig()
 
-    # --- Initialize wandb safely ---
-    try:
-        wandb.init(
-            project=cfg.project,
-            entity=cfg.entity,
-            name=cfg.run_name,
-            config={k: v for k, v in cfg.__dict__.items() if not k.startswith("__")},
-        )
-    except Exception as e:
-        print(f"[WARN] W&B init failed ({e}); running offline mode.")
-        os.environ["WANDB_MODE"] = "offline"
-        wandb.init(mode="offline", project=cfg.project, name=cfg.run_name)
+    if local_rank == 0:
+        wandb.init(project=cfg.project, entity=cfg.entity, name=cfg.run_name, config=vars(cfg))
 
-    # --- Dataset (no DataLoader; TokenizerDataset is iterable) ---
-    dataset = TokenizerDataset(
+    dataset = TokenizerDatasetDDP(
         video_dir=cfg.data_dir,
         resize=cfg.resize,
         clip_length=cfg.clip_length,
         patch_size=cfg.patch_size,
         mask_prob_range=(0.1, 0.9),
         per_frame_mask_sampling=True,
-        mode="random"
+        mode="random",
     )
+    sampler = DistributedSampler(dataset, shuffle=True)
+    loader = DataLoader(dataset, batch_size=cfg.batch_size, sampler=sampler, num_workers=cfg.num_workers, pin_memory=True)
 
-    # --- Model ---
     model = CausalTokenizer(
         input_dim=cfg.input_dim,
         embed_dim=cfg.embed_dim,
         num_heads=cfg.num_heads,
         num_layers=cfg.num_layers,
         latent_dim=cfg.latent_dim,
-    ).to(cfg.device)
+    ).to(device)
+    model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank])
 
-    # --- Loss & optimizer ---
-    criterion = CombinedLoss(alpha=cfg.alpha).to(cfg.device)
+    criterion = CombinedLoss(alpha=cfg.alpha).to(device)
     optimizer = AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
-    scaler = GradScaler()
+    scaler = amp.GradScaler()
 
-    wandb.watch(model, criterion, log="all", log_freq=cfg.log_interval)
+    if local_rank == 0:
+        wandb.watch(model, criterion, log="all", log_freq=cfg.log_interval)
 
-    print(f"[INFO] Training tokenizer on {cfg.device} for {cfg.max_epochs} epochs")
+    print(f"[Rank {local_rank}] ready on {device}")
 
-    # -----------------------------------------------------------------------
-    # Training loop
-    # -----------------------------------------------------------------------
     for epoch in range(1, cfg.max_epochs + 1):
         model.train()
-        total_loss, mse_loss, lpips_loss = 0.0, 0.0, 0.0
+        sampler.set_epoch(epoch)
+        running_total = running_mse = running_lpips = 0.0
 
-        progress = tqdm(enumerate(dataset), desc=f"Epoch {epoch}")
+        for step, batch in enumerate(tqdm(loader, disable=(local_rank != 0)), start=1):
+            patches = batch["patch_tokens"].to(device)
+            mask = batch["mask"].to(device)
 
-        for step, batch in progress:
-            patches = batch["patch_tokens"].to(cfg.device)  # (T, N, D)
-            mask = batch["mask"].to(cfg.device)              # (T, N)
-
-            # Add batch dimension (B=1 if dataset yields one clip)
-            patches = patches.unsqueeze(0)
-            mask = mask.unsqueeze(0)
-
-            with autocast():
+            with amp.autocast(device_type="cuda"):
                 recon = model(patches, mask)
                 loss, parts = criterion(recon, patches, mask.unsqueeze(-1))
 
-            optimizer.zero_grad()
+            loss = loss / cfg.accumulation_steps
             scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
 
-            total_loss += loss.item()
-            mse_loss += parts["mse"]
-            lpips_loss += parts["lpips"]
+            if step % cfg.accumulation_steps == 0:
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
 
-            if (step + 1) % cfg.log_interval == 0:
-                avg_total = total_loss / cfg.log_interval
-                avg_mse = mse_loss / cfg.log_interval
-                avg_lpips = lpips_loss / cfg.log_interval
+            running_total += loss.item() * cfg.accumulation_steps
+            running_mse += parts["mse"]
+            running_lpips += parts["lpips"]
 
+            if local_rank == 0 and step % cfg.log_interval == 0:
                 wandb.log({
-                    "train/total_loss": avg_total,
-                    "train/mse_loss": avg_mse,
-                    "train/lpips_loss": avg_lpips,
+                    "train/total_loss": running_total / cfg.log_interval,
+                    "train/mse_loss": running_mse / cfg.log_interval,
+                    "train/lpips_loss": running_lpips / cfg.log_interval,
                     "epoch": epoch,
-                    "step": step + epoch * 1000,  # synthetic step counter
+                    "step": step,
                 })
+                print(f"[Epoch {epoch} Step {step}] total={running_total / cfg.log_interval:.4f}")
+                running_total = running_mse = running_lpips = 0.0
 
-                progress.set_postfix({
-                    "total": f"{avg_total:.4f}",
-                    "mse": f"{avg_mse:.4f}",
-                    "lpips": f"{avg_lpips:.4f}",
-                })
-                total_loss = mse_loss = lpips_loss = 0.0
+        if local_rank == 0:
+            save_checkpoint(model, optimizer, epoch, cfg, local_rank)
+            wandb.log({"epoch_end": epoch})
 
-        save_checkpoint(model, optimizer, epoch, parts, cfg)
-        wandb.log({"epoch_end": epoch})
+    dist.destroy_process_group()
 
-    wandb.finish()
-
+# ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    train_tokenizer()
+    main()
