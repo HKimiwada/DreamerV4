@@ -23,7 +23,7 @@ import wandb
 
 from tokenizer.tokenizer_dataset import TokenizerDatasetDDP
 from tokenizer.model.encoder_decoder import CausalTokenizer
-from tokenizer.losses import CombinedLoss
+from tokenizer.losses import MSELoss
 
 # ---------------------------------------------------------------------------
 class TrainConfig:
@@ -47,7 +47,7 @@ class TrainConfig:
     alpha = 0.0
     project = "DreamerV4-tokenizer"
     entity = "hiroki-kimiwada-"     # stays as provided
-    run_name = "tokenizer_v4_lpips_ddp"
+    run_name = "v1_tokenizer_mse_only"
 
 # ---------------------------------------------------------------------------
 def save_checkpoint(model, optimizer, epoch, cfg, rank):
@@ -117,7 +117,7 @@ def main():
     ).to(device)
     model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank])
 
-    criterion = CombinedLoss(alpha=cfg.alpha).to(device)
+    criterion = MSELoss().to(device)
     optimizer = AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     scaler = amp.GradScaler()
 
@@ -140,7 +140,8 @@ def main():
                 # autocast in FP16
                 with amp.autocast(device_type="cuda"):
                     recon = model(patches, mask)
-                    loss, parts = criterion(recon, patches, mask.unsqueeze(-1))
+                    loss = criterion(recon, patches, mask.unsqueeze(-1))
+                    parts = {'mse': loss.item(), 'lpips': 0.0}
 
                 loss = loss / cfg.accumulation_steps
                 scaler.scale(loss).backward()
