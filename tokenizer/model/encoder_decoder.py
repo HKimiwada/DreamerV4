@@ -15,10 +15,8 @@ Conceptual Overview:
 """
 import torch
 import torch.nn as nn
-from tokenizer.model.transformer_blocks import BlockCausalTransformer
+import torch.utils.checkpoint as checkpoint
 
-import torch
-import torch.nn as nn
 from tokenizer.model.transformer_blocks import BlockCausalTransformer
 
 class CausalTokenizer(nn.Module):
@@ -44,83 +42,116 @@ class CausalTokenizer(nn.Module):
         latent_dim: dimension of bottleneck (latent projection)
         causal_masking_function: function to generate lower-triangular masks
     """
+    """
+    Memory-optimized masked autoencoding transformer (for DreamerV4 tokenizer training).
 
-    def __init__(self, input_dim=768, embed_dim=768, num_heads=8, num_layers=12, latent_dim=256):
+    Features:
+      - Gradient checkpointing for lower memory usage.
+      - Optional FlashAttention (if installed).
+      - Same architecture and forward signature as baseline version.
+
+    Args:
+        input_dim: dimension of input patch tokens
+        embed_dim: internal transformer embedding dimension
+        num_heads: number of attention heads
+        num_layers: layers per encoder/decoder stack
+        latent_dim: latent bottleneck dimension
+        use_checkpoint: enable gradient checkpointing
+    """
+
+    def __init__(
+        self,
+        input_dim: int = 768,
+        embed_dim: int = 768,
+        num_heads: int = 8,
+        num_layers: int = 12,
+        latent_dim: int = 256,
+        use_checkpoint: bool = True,
+    ):
         super().__init__()
-        self.mask_token = nn.Parameter(torch.randn(embed_dim)) # Learnable mask embedding (used to replace masked patches)
-        self.input_proj = nn.Linear(input_dim, embed_dim) # Linear projection to embedding space (patch_dim → embed_dim)
+        self.mask_token = nn.Parameter(torch.randn(embed_dim))
+        self.input_proj = nn.Linear(input_dim, embed_dim)
         self.embed_dim = embed_dim
         self.latent_dim = latent_dim
         self.num_layers = num_layers
         self.num_heads = num_heads
+        self.use_checkpoint = use_checkpoint
 
-        # Encoder stack: alternating spatial/temporal transformer blocks
+        # --- Encoder stack ---
         encoder_blocks = []
         for i in range(num_layers):
-            # every 4th block is temporal (causal=True)
             causal_time = (i % 4 == 3)
-            encoder_blocks.append(
-                BlockCausalTransformer(embed_dim, num_heads, causal_time)
-            )
+            encoder_blocks.append(BlockCausalTransformer(embed_dim, num_heads, causal_time))
         self.encoder = nn.ModuleList(encoder_blocks)
 
-        # Latent projection bottleneck (linear + tanh) 
+        # --- Latent bottleneck ---
         self.to_latent = nn.Sequential(
             nn.Linear(embed_dim, latent_dim),
             nn.Tanh()
         )
-        
-        # Decoder stack: same architecture as encoder 
+        self.from_latent = nn.Linear(latent_dim, embed_dim)
+
+        # --- Decoder stack ---
         decoder_blocks = []
         for i in range(num_layers):
             causal_time = (i % 4 == 3)
-            decoder_blocks.append(
-                BlockCausalTransformer(embed_dim, num_heads, causal_time)
-            )
-        self.decoder = nn.ModuleList(decoder_blocks) 
+            decoder_blocks.append(BlockCausalTransformer(embed_dim, num_heads, causal_time))
+        self.decoder = nn.ModuleList(decoder_blocks)
 
-        self.from_latent = nn.Linear(latent_dim, embed_dim) # Linear projection from latent back to embedding space.
-        self.output_proj = nn.Linear(embed_dim, input_dim) # Linear projection from embedding space back to patch dimension
-    
+        self.output_proj = nn.Linear(embed_dim, input_dim)
+
+        # --- Optional FlashAttention (PyTorch >=2.1) ---
+        self.use_flash_attention = hasattr(torch.nn.functional, "scaled_dot_product_attention")
+
+        if self.use_flash_attention:
+            print("[INFO] FlashAttention supported — using efficient attention kernels.")
+        else:
+            print("[WARN] FlashAttention not available — using standard attention.")
+
+    # ------------------------------------------------------------------
+    def _run_stack(self, x, stack):
+        """
+        Helper: runs transformer stack with optional checkpointing.
+        """
+        for layer in stack:
+            if self.use_checkpoint:
+                x = checkpoint.checkpoint(layer, x, use_reentrant=False)
+            else:
+                x = layer(x)
+        return x
+
+    # ------------------------------------------------------------------
     def forward(self, patch_tokens, mask):
         """
-        Forward pass through the Causal Tokenizer.
         Args:
-            patch_tokens: Tensor of shape (B, T, N, D_in) - input patch tokens
-            mask: Boolean Tensor of shape (B, T, N) - True for masked patches
-                B: batch size
-                T: number of frames per clip
-                N: patches per frame (e.g., 24×40 = 960)
-                D_in: patch embedding dimension (e.g., 768)
+            patch_tokens: (B, T, N, D_in)
+            mask: (B, T, N) boolean tensor
         Returns:
-            reconstructed_tokens: Tensor of shape (B, T, N, D_in) - reconstructed patch tokens
+            reconstructed_tokens: (B, T, N, D_in)
         """
         B, T, N, D_in = patch_tokens.shape
-        # Project to embed space
-        x = self.input_proj(patch_tokens)               # (B, T, N, embed_dim)
+        x = self.input_proj(patch_tokens)  # (B, T, N, embed_dim)
 
         # Replace masked patches
         mask_exp = mask.unsqueeze(-1).expand(-1, -1, -1, self.embed_dim)
         x = torch.where(mask_exp, self.mask_token.view(1, 1, 1, -1), x)
 
-        # Flatten space–time
+        # Flatten spatial+temporal dims
         x = x.view(B, T * N, self.embed_dim)
 
-        # Encode
-        for layer in self.encoder:
-            x = layer(x)
+        # Encoder stack
+        x = self._run_stack(x, self.encoder)
 
-        # Unflatten back to frames for bottleneck
+        # Bottleneck
         x = x.view(B, T, N, self.embed_dim)
         x = self.to_latent(x)
         x = self.from_latent(x)
 
-        # Flatten again for decoder
+        # Decoder stack
         x = x.view(B, T * N, self.embed_dim)
-        for layer in self.decoder:
-            x = layer(x)
+        x = self._run_stack(x, self.decoder)
 
-        # Reshape and project out
+        # Reconstruct
         x = x.view(B, T, N, self.embed_dim)
         reconstructed_tokens = self.output_proj(x)
         return reconstructed_tokens

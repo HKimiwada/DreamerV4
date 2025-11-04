@@ -66,25 +66,28 @@ class MultiHeadAttention(nn.Module):
 
     def forward(self, x):
         batch_size, seq_len, _ = x.size()
-        # Project inputs to Q, K, V (batch_size, seq_len, input_size)
-        Q = self.w_q(x) 
+        Q = self.w_q(x)
         K = self.w_k(x)
         V = self.w_v(x)
-        # Reshape QKV into heads (batch_size, num_heads, seq_len, head_dim)
+
+        # reshape to (B, heads, L, d)
         Q = Q.view(batch_size, self.num_heads, seq_len, self.head_dim)
         K = K.view(batch_size, self.num_heads, seq_len, self.head_dim)
         V = V.view(batch_size, self.num_heads, seq_len, self.head_dim)
-        # Scaled dot-product attention
-        scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        if self.causal:
-            mask = self._causal_masking_function(seq_len).to(x.device)  # (seq_len, seq_len)
-            scores = scores.masked_fill(mask.unsqueeze(0).unsqueeze(0) == 0, float('-inf'))
-        attn_weights = F.softmax(scores, dim=-1)
-        attn_output = torch.matmul(attn_weights, V)  # (batch_size, num_heads, seq_len, head_dim)
-        # Concatenate heads and project out
-        attn_output = attn_output.view(batch_size, seq_len, -1)  # (batch_size, seq_len, input_size)
-        attn_output = self.dropout(self.w_out(attn_output))
-        return attn_output
+
+        # use SDPA (FlashAttention path if available) – no explicit scores tensor
+        # When temporal causal is on, let SDPA do causal masking
+        attn_out = F.scaled_dot_product_attention(
+            Q, K, V,
+            attn_mask=None,
+            dropout_p=0.0,
+            is_causal=self.causal  # True for temporal layers, False for spatial
+        )
+        # back to (B, L, input_size)
+        attn_out = attn_out.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
+        attn_out = self.dropout(self.w_out(attn_out))
+        return attn_out
+
 
 class BlockCausalTransformer(nn.Module):
     """
