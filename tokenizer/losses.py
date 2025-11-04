@@ -122,21 +122,21 @@ class CombinedLoss(nn.Module):
         # --- Handle video inputs (B,T,C,H,W) ---
         if recon.dim() == 5:
             B, T, C, H, W = recon.shape
-            recon_2d  = recon.reshape(B * T, C, H, W)
-            target_2d = target.reshape(B * T, C, H, W)
+            # ensure channels come before spatial dims when flattening time
+            recon_2d  = recon.permute(0, 1, 2, 3, 4).contiguous().reshape(B * T, C, H, W)
+            target_2d = target.permute(0, 1, 2, 3, 4).contiguous().reshape(B * T, C, H, W)
             if mask is not None:
-                # (B,T,1,H,W) or (B,T,H,W) -> (B*T,1,H,W)
                 if mask.dim() == 5:
-                    mask_2d = mask.view(B * T, 1, H, W)
+                    mask_2d = mask.contiguous().reshape(B * T, 1, H, W)
                 elif mask.dim() == 4:
-                    mask_2d = mask.unsqueeze(1).repeat(1, T, 1, 1, 1).view(B * T, 1, H, W)
+                    mask_2d = mask.unsqueeze(1).repeat(1, T, 1, 1, 1).reshape(B * T, 1, H, W)
                 else:
                     mask_2d = None
             else:
                 mask_2d = None
         else:
-            # --- Handle image inputs (B,C,H,W) ---
             recon_2d, target_2d, mask_2d = recon, target, mask
+
 
         # --- Compute losses ---
         mse_val = self.mse_loss(recon, target, mask)

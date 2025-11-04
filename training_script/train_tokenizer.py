@@ -44,7 +44,7 @@ class TrainConfig:
     log_interval = 25
     accumulation_steps = 8
     ckpt_dir = Path("checkpoints")
-    alpha = 0.2
+    alpha = 0.0
     project = "DreamerV4-tokenizer"
     entity = "hiroki-kimiwada-"     # stays as provided
     run_name = "tokenizer_v4_lpips_ddp"
