@@ -28,11 +28,11 @@ from tokenizer.losses import MSELoss
 # ---------------------------------------------------------------------------
 class TrainConfig:
     data_dir = Path("data")
-    resize = (192, 320)
+    resize = (384, 640)
     patch_size = 16
-    clip_length = 4
+    clip_length = 8
     batch_size = 1
-    num_workers = 0
+    num_workers = 1
     input_dim = 3 * patch_size * patch_size
     embed_dim = 256
     latent_dim = 128
@@ -40,14 +40,14 @@ class TrainConfig:
     num_layers = 8
     lr = 1e-4
     weight_decay = 0.05
-    max_epochs = 1
+    max_epochs = 5
     log_interval = 5
     accumulation_steps = 8
     ckpt_dir = Path("checkpoints")
     alpha = 0.0
     project = "DreamerV4-tokenizer"
     entity = "hiroki-kimiwada-"     # stays as provided
-    run_name = "v1_tokenizer_mse_only"
+    run_name = "v2_tokenizer_mse_only"
 
 # ---------------------------------------------------------------------------
 def save_checkpoint(model, optimizer, epoch, cfg, rank):
