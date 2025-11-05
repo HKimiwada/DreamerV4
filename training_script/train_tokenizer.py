@@ -1,6 +1,6 @@
 """
 wandb login
-PYTHONPATH=. torchrun --nproc_per_node=8 training_script/train_tokenizer.py
+PYTHONPATH=. torchrun --nproc_per_node=2 training_script/train_tokenizer.py
 Overview of Training script for tokenizer:
     1. Load video patch data from your preprocessed dataset (TokenizerDatasetDDP).
     2. Feed it into the tokenizer (encoder–decoder).
