@@ -28,11 +28,11 @@ from tokenizer.losses import MSELoss
 # ---------------------------------------------------------------------------
 class TrainConfig:
     data_dir = Path("data")
-    resize = (384, 640)
+    resize = (192, 320)
     patch_size = 16
-    clip_length = 16
+    clip_length = 4
     batch_size = 1
-    num_workers = 2
+    num_workers = 0
     input_dim = 3 * patch_size * patch_size
     embed_dim = 256
     latent_dim = 128
@@ -40,8 +40,8 @@ class TrainConfig:
     num_layers = 8
     lr = 1e-4
     weight_decay = 0.05
-    max_epochs = 5
-    log_interval = 25
+    max_epochs = 1
+    log_interval = 5
     accumulation_steps = 8
     ckpt_dir = Path("checkpoints")
     alpha = 0.0
@@ -97,13 +97,18 @@ def main():
         mode="random",
     )
     sampler = DistributedSampler(dataset, shuffle=True)
+
+    use_workers = cfg.num_workers > 0
+    prefetch = 1 if use_workers else None
+    persist  = use_workers  # must be False when num_workers == 0
+
     loader = DataLoader(
         dataset,
         batch_size=cfg.batch_size,
         sampler=sampler,
         num_workers=cfg.num_workers,
-        prefetch_factor=1,            # lower prefetch pressure
-        persistent_workers=False,     # kills workers cleanly on exit
+        prefetch_factor=prefetch,      # None when num_workers == 0
+        persistent_workers=persist,    # False when num_workers == 0
         pin_memory=True
     )
 
