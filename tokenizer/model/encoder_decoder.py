@@ -99,10 +99,9 @@ class CausalTokenizer(nn.Module):
         self.decoder = nn.ModuleList(decoder_blocks)
 
         self.output_proj = nn.Linear(embed_dim, input_dim)
-        self.output_activation = nn.Sigmoid() # Bounds output to [0,1]
 
         self.pos_embed = nn.Parameter(torch.zeros(1, 100000, embed_dim))
-        nn.init.trunc_normal_(self.pos_embed, std=0.02)
+        nn.init.trunc_normal_(self.pos_embed, std=0.5)
         self._max_len = 100000
 
         # --- Optional FlashAttention (PyTorch >=2.1) ---
@@ -114,18 +113,22 @@ class CausalTokenizer(nn.Module):
             print("[WARN] FlashAttention not available — using standard attention.")
 
     # ------------------------------------------------------------------
-    def _run_stack(self, x, stack):
+    def _run_stack(self, x, stack, T, N):
         """
         Helper: runs transformer stack with optional checkpointing.
+        Now passes T and N for proper spatial/temporal attention.
         """
         for layer in stack:
             if self.use_checkpoint:
-                x = checkpoint.checkpoint(layer, x, use_reentrant=False)
+                # Checkpointing with T and N
+                x = checkpoint.checkpoint(
+                    layer, x, T, N, 
+                    use_reentrant=False
+                )
             else:
-                x = layer(x)
+                x = layer(x, T, N)
         return x
 
-    # ------------------------------------------------------------------
     def forward(self, patch_tokens, mask):
         """
         Args:
@@ -148,21 +151,20 @@ class CausalTokenizer(nn.Module):
         seq_len = T * N
         x = x + self.pos_embed[:, :seq_len, :]
 
-        # Encoder stack
-        x = self._run_stack(x, self.encoder)
+        # Encoder stack - NOW WITH T AND N
+        x = self._run_stack(x, self.encoder, T, N)
 
         # Bottleneck
         x = x.view(B, T, N, self.embed_dim)
         x = self.to_latent(x)
         x = self.from_latent(x)
 
-        # Decoder stack
+        # Decoder stack - NOW WITH T AND N
         x = x.view(B, T * N, self.embed_dim)
-        x = self._run_stack(x, self.decoder)
+        x = self._run_stack(x, self.decoder, T, N)
 
         # Reconstruct
         x = x.view(B, T, N, self.embed_dim)
         reconstructed_tokens = self.output_proj(x)
-        reconstructed_tokens = self.output_activation(reconstructed_tokens)
 
         return reconstructed_tokens

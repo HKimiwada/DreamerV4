@@ -1,25 +1,7 @@
 """
-CUDA_VISIBLE_DEVICES=1 PYTHONPATH=. torchrun training_script/train_tokenizer_overfit.py
-
-Debug list:
-11/05 (v2_overfit): Bounded output range to [0, 1] in CausalTokenizer using sigmoid.
-11/06 (v3_overfit): Compute loss on all patches (not just masked patches)
-11/06 (v4_overfit): Added positional encoding to CausalTokenizer.
-
-train_tokenizer.py but for one video to overfit and check if model architecture works.
-Target File: data/cheeky-cornflower-setter-0a5ba522405b-20220422-133010.mp4
-
-Overfit tokenizer on a single video to validate architecture and training.
-This script:
-  1. Loads ONE specific video
-  2. Trains the tokenizer to reconstruct it perfectly
-  3. Logs metrics and reconstructions to wandb
-  4. Saves checkpoints when loss improves
-
-Use this to verify that:
-  - Your model can learn (loss goes down)
-  - Reconstructions look visually correct
-  - No bugs in the training loop
+Testing Perceptual Loss (LPIPS: 0.8 weight)
+PYTHONPATH=. torchrun --nproc_per_node=1 training_script/v3_perceptual.py
+CUDA_VISIBLE_DEVICES=4 PYTHONPATH=. python training_script/v3_perceptual.py
 """
 import os
 from pathlib import Path
@@ -33,7 +15,7 @@ import imageio.v2 as imageio
 
 from tokenizer.tokenizer_dataset import TokenizerDatasetDDP
 from tokenizer.model.encoder_decoder import CausalTokenizer
-from tokenizer.losses import MSELoss
+from tokenizer.losses import MSELoss, CombinedLoss
 from tokenizer.patchify_mask import Patchifier
 
 # ---------------------------------------------------------------------------
@@ -64,14 +46,19 @@ class OverfitConfig:
     visualize_interval = 10  # visualize reconstructions every N epochs
     num_frames_to_viz = 4  # how many frames to visualize
     
+    # Loss configuration
+    use_combined_loss = True  # Set to False to use MSE only
+    lpips_weight = 0.8  # Weight for LPIPS (as in Dreamer4 paper)
+    lpips_net = 'alex'  # 'alex', 'vgg', or 'squeeze'
+
     # Paths
     ckpt_dir = Path("checkpoints/overfit")
-    viz_dir = Path("visualizations/overfit_mse")
+    viz_dir = Path("visualizations/overfit_perceptual_loss_v3")
     
     # WandB
     project = "Latest_DreamerV4"
     entity = "hiroki-kimiwada-"
-    run_name = "v1_no_masking_overfit"
+    run_name = "v3_combined_loss_overfit"  # Updated run name
 
 # ---------------------------------------------------------------------------
 def save_best_checkpoint(model, optimizer, epoch, loss, cfg, best_loss):
@@ -303,11 +290,22 @@ def main():
     print(f"[Model] {num_params:.2f}M parameters")
     
     # --- loss & optimizer ---
-    criterion = MSELoss().to(device)
+    if cfg.use_combined_loss:
+        criterion = CombinedLoss(
+            lpips_weight=cfg.lpips_weight,
+            lpips_net=cfg.lpips_net,
+            patch_size=cfg.patch_size,
+            frame_size=cfg.resize
+        ).to(device)
+        print(f"[Loss] Using Combined Loss (MSE + {cfg.lpips_weight} * LPIPS)")
+    else:
+        criterion = MSELoss().to(device)
+        print(f"[Loss] Using MSE only")
+    
     optimizer = AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     
     # Watch model in wandb
-    wandb.watch(model, criterion, log="all", log_freq=cfg.log_interval)
+    wandb.watch(model, log="all", log_freq=cfg.log_interval)
     
     # --- training loop ---
     best_loss = float('inf')
@@ -315,6 +313,8 @@ def main():
     for epoch in range(1, cfg.max_epochs + 1):
         model.train()
         epoch_loss = 0.0
+        epoch_mse = 0.0
+        epoch_lpips = 0.0
         num_batches = 0
         
         pbar = tqdm(loader, desc=f"Epoch {epoch}/{cfg.max_epochs}")
@@ -324,7 +324,22 @@ def main():
             
             # Forward
             recon = model(patches, mask)
-            loss = criterion(recon, patches, None)
+            
+            # Compute loss (handle both MSE and CombinedLoss signatures)
+            loss_output = criterion(recon, patches, None)
+            
+            if isinstance(loss_output, tuple):
+                # CombinedLoss returns (loss, loss_dict)
+                loss, loss_dict = loss_output
+                batch_mse = loss_dict['mse']
+                batch_lpips = loss_dict['lpips']
+                epoch_mse += batch_mse
+                epoch_lpips += batch_lpips
+            else:
+                # MSELoss returns scalar only
+                loss = loss_output
+                batch_mse = loss.item()
+                batch_lpips = 0.0
             
             # Backward
             optimizer.zero_grad()
@@ -340,23 +355,50 @@ def main():
             num_batches += 1
             
             # Update progress bar
-            pbar.set_postfix({"loss": loss.item()})
+            if cfg.use_combined_loss:
+                pbar.set_postfix({
+                    "loss": loss.item(),
+                    "mse": batch_mse,
+                    "lpips": batch_lpips
+                })
+            else:
+                pbar.set_postfix({"loss": loss.item()})
             
             # Log to wandb
             if step % cfg.log_interval == 0:
-                wandb.log({
+                log_dict = {
                     "train/loss": loss.item(),
                     "train/epoch": epoch,
                     "train/step": step,
-                })
+                }
+                if cfg.use_combined_loss:
+                    log_dict.update({
+                        "train/mse": batch_mse,
+                        "train/lpips": batch_lpips,
+                    })
+                wandb.log(log_dict)
         
         # Epoch summary
         avg_epoch_loss = epoch_loss / num_batches
-        print(f"[Epoch {epoch}] Avg Loss: {avg_epoch_loss:.6f}")
-        wandb.log({
+        
+        # Log epoch averages
+        log_dict = {
             "epoch/avg_loss": avg_epoch_loss,
             "epoch/num": epoch,
-        })
+        }
+        
+        if cfg.use_combined_loss:
+            avg_mse = epoch_mse / num_batches
+            avg_lpips = epoch_lpips / num_batches
+            log_dict.update({
+                "epoch/avg_mse": avg_mse,
+                "epoch/avg_lpips": avg_lpips,
+            })
+            print(f"[Epoch {epoch}] Avg Loss: {avg_epoch_loss:.6f} | MSE: {avg_mse:.6f} | LPIPS: {avg_lpips:.6f}")
+        else:
+            print(f"[Epoch {epoch}] Avg Loss: {avg_epoch_loss:.6f}")
+        
+        wandb.log(log_dict)
         
         # --- save checkpoint if improved ---
         # best_loss = save_best_checkpoint(model, optimizer, epoch, avg_epoch_loss, cfg, best_loss)
@@ -367,9 +409,8 @@ def main():
             viz_batch = next(iter(loader))
             visualize_reconstruction(model, viz_batch, cfg, epoch, device)
     
-    print(f"\n[Training Complete]")
-    # print(f"\n[Training Complete] Best loss: {best_loss:.6f}")
-    # print(f"Best model saved at: {cfg.ckpt_dir / 'best_model.pt'}")
+    print(f"\n[Training Complete] Best loss: {best_loss:.6f}")
+    print(f"Best model saved at: {cfg.ckpt_dir / 'best_model.pt'}")
     wandb.finish()
 
 # ---------------------------------------------------------------------------

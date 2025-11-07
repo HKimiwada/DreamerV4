@@ -88,8 +88,12 @@ class MultiHeadAttention(nn.Module):
         attn_out = self.dropout(self.w_out(attn_out))
         return attn_out
 
-
 class BlockCausalTransformer(nn.Module):
+    """
+    Transformer block with separate spatial and temporal attention.
+    - Spatial layers: full attention within each frame
+    - Temporal layers: causal attention across time
+    """
     """
     Combines normalization, attention, feedforward, skip connections into one self-contained transformer layer.
     Dreamer 4 uses this block in every part of the world model (tokenizer, dynamics, etc.),
@@ -113,12 +117,63 @@ class BlockCausalTransformer(nn.Module):
         self.norm2 = RMSNorm(input_size)
         self.attn = MultiHeadAttention(input_size, num_heads, causal_time)
         self.ffn = FeedForward(input_size, hidden_size=int(4*input_size))
+        self.causal_time = causal_time
+        self.input_size = input_size
        
-    def forward(self, x):
-        norm_x = self.norm1(x)
-        attn_output = self.attn(norm_x)
-        x = x + attn_output  
-        norm_x = self.norm2(x)
-        ffn_output = self.ffn(norm_x)
-        x = x + ffn_output
+    def forward(self, x, T=None, N=None):
+        """
+        Args:
+            x: (B, T*N, D) - flattened sequence
+            T: number of frames
+            N: number of patches per frame
+        """
+        B, seq_len, D = x.shape
+        
+        # If T and N not provided, treat as standard attention
+        if T is None or N is None:
+            norm_x = self.norm1(x)
+            attn_output = self.attn(norm_x)
+            x = x + attn_output  
+            norm_x = self.norm2(x)
+            ffn_output = self.ffn(norm_x)
+            x = x + ffn_output
+            return x
+        
+        # Factorized spatial/temporal attention
+        if not self.causal_time:
+            # SPATIAL LAYER: attend within each frame
+            # Reshape to (B*T, N, D) to process each frame independently
+            x_reshaped = x.view(B, T, N, D).reshape(B * T, N, D)
+            
+            # Apply attention within each frame
+            norm_x = self.norm1(x_reshaped)
+            attn_output = self.attn(norm_x)
+            x_reshaped = x_reshaped + attn_output
+            
+            # Feedforward
+            norm_x = self.norm2(x_reshaped)
+            ffn_output = self.ffn(norm_x)
+            x_reshaped = x_reshaped + ffn_output
+            
+            # Reshape back to (B, T*N, D)
+            x = x_reshaped.view(B, T, N, D).reshape(B, T * N, D)
+            
+        else:
+            # TEMPORAL LAYER: attend across time (causal)
+            # Reshape to (B*N, T, D) to process each spatial position across time
+            x_reshaped = x.view(B, T, N, D).permute(0, 2, 1, 3).reshape(B * N, T, D)
+            
+            # Apply causal attention across time
+            norm_x = self.norm1(x_reshaped)
+            attn_output = self.attn(norm_x)
+            x_reshaped = x_reshaped + attn_output
+            
+            # Feedforward
+            norm_x = self.norm2(x_reshaped)
+            ffn_output = self.ffn(norm_x)
+            x_reshaped = x_reshaped + ffn_output
+            
+            # Reshape back to (B, T*N, D)
+            x = x_reshaped.view(B, N, T, D).permute(0, 2, 1, 3).reshape(B, T * N, D)
+        
         return x

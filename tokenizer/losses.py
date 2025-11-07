@@ -1,14 +1,9 @@
 # python tokenizer/losses.py
+# tokenizer/losses.py
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-try:
-    import lpips
-    _LPIPS_AVAILABLE = True
-except ImportError:
-    _LPIPS_AVAILABLE = False
-    # You must install the `lpips` package (e.g. pip install lpips) to use LPIPS loss.
+import lpips
 
 class MSELoss(nn.Module):
     """
@@ -20,9 +15,9 @@ class MSELoss(nn.Module):
     def forward(self, recon: torch.Tensor, target: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
         """
         Args:
-            recon: Tensor of shape (B, C, H, W)
+            recon: Tensor of shape (B, C, H, W) or (B, T, N, D) for patches
             target: Tensor of same shape
-            mask: Optional tensor broadcastable to (B, C, H, W) or (B, 1, H, W)
+            mask: Optional tensor broadcastable to input shape
         Returns:
             scalar Tensor (loss)
         """
@@ -38,111 +33,112 @@ class MSELoss(nn.Module):
         else:
             return F.mse_loss(recon, target)
 
-class LPIPSLoss(nn.Module):
-    """
-    LPIPS loss (Learned Perceptual Image Patch Similarity).
-    Requires the `lpips` package.
-    Inputs must be in the proper range (by default: [-1, +1] for LPIPS).
-    """
-    def __init__(self, net: str = 'vgg', version: str = '0.1', normalize_inputs: bool = True):
-        """
-        Args:
-            net: which backbone (‘alex’, ‘vgg’, etc) for LPIPS. Refer to package docs. :contentReference[oaicite:1]{index=1}
-            version: version of the LPIPS weights.
-            normalize_inputs: if True, expects input in [0,1] and will convert to [-1,1] internally.
-        """
-        super(LPIPSLoss, self).__init__()
-        if not _LPIPS_AVAILABLE:
-            raise ImportError("lpips package not found. Install via `pip install lpips` to use LPIPSLoss.")
-        self.lpips_fn = lpips.LPIPS(net=net, version=version).eval()
-        for p in self.lpips_fn.parameters():
-            p.requires_grad = False
-        self.normalize_inputs = normalize_inputs
-
-    def forward(self, recon: torch.Tensor, target: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
-        """
-        Args:
-            recon, target: tensors shape (B, 3, H, W)
-            mask: optional mask (B,1,H,W) or (B,3,H,W) — will zero out masked regions.
-        Returns:
-            scalar Tensor (loss)
-        """
-        # normalize to [-1, +1] if needed
-        if self.normalize_inputs:
-            recon_norm = recon * 2.0 - 1.0
-            target_norm = target * 2.0 - 1.0
-        else:
-            recon_norm = recon
-            target_norm = target
-
-        # apply mask if provided
-        if mask is not None:
-            if mask.dim() == 3:
-                mask = mask.unsqueeze(1)
-            # broadcast mask to 3 channels if necessary
-            if mask.shape[1] == 1 and recon_norm.shape[1] == 3:
-                mask = mask.repeat(1, 3, 1, 1)
-            recon_norm = recon_norm * mask
-            target_norm = target_norm * mask
-
-        # compute lpips distance
-        loss_val = self.lpips_fn(recon_norm, target_norm)
-        # Typically returns shape (B,1,1,1) or (B,), so mean over batch
-        return loss_val.mean()
 
 class CombinedLoss(nn.Module):
     """
-    Wrapper loss combining MSE + LPIPS with weighting.
-    total_loss = (1 - alpha) * mse + alpha * lpips
+    Combined MSE + LPIPS loss as used in Dreamer4.
+    
+    Loss = MSE + λ * LPIPS
+    
+    Supports both patch-based and image-based inputs.
+    For patches, unpatchifies them internally before computing LPIPS.
+    
+    Args:
+        lpips_weight: Weight for LPIPS loss (default 0.1 as in paper)
+        lpips_net: Network for LPIPS ('alex', 'vgg', or 'squeeze')
+        patch_size: Size of patches (required if using patch inputs)
+        frame_size: (H, W) frame dimensions (required if using patch inputs)
     """
-    def __init__(self, alpha: float = 0.5, lpips_net: str = 'vgg', lpips_version: str = '0.1', normalize_inputs_lpips: bool = True):
-        """
-        Args:
-            alpha: weight for LPIPS part (between 0 and 1)
-            lpips_net, lpips_version, normalize_inputs_lpips: args forwarded to LPIPSLoss
-        """
-        super(CombinedLoss, self).__init__()
-        self.alpha = alpha
+    def __init__(self, lpips_weight=0.1, lpips_net='alex', patch_size=None, frame_size=None):
+        super().__init__()
         self.mse_loss = MSELoss()
-        self.lpips_loss = LPIPSLoss(net=lpips_net, version=lpips_version, normalize_inputs=normalize_inputs_lpips)
-
-    def forward(self, recon: torch.Tensor, target: torch.Tensor, mask: torch.Tensor = None):
+        # LPIPS expects input in [-1, 1] range
+        self.lpips_fn = lpips.LPIPS(net=lpips_net).eval()
+        self.lpips_weight = lpips_weight
+        
+        # For unpatchifying
+        self.patch_size = patch_size
+        self.frame_size = frame_size
+        if patch_size is not None:
+            from tokenizer.patchify_mask import Patchifier
+            self.patchifier = Patchifier(patch_size=patch_size)
+        
+        # Freeze LPIPS network
+        for param in self.lpips_fn.parameters():
+            param.requires_grad = False
+    
+    def unpatchify_batch(self, patches: torch.Tensor) -> torch.Tensor:
         """
-        Compute combined MSE + LPIPS loss.
-        Works for both image (B,3,H,W) and video (B,T,3,H,W) inputs.
-
+        Convert patches to images.
         Args:
-            recon, target: (B, C, H, W) or (B, T, C, H, W)
-            mask: optional mask matching spatial dims,
-                e.g. (B, 1, H, W), (B, C, H, W), or (B, T, 1, H, W)
+            patches: (B, T, N, D) where D = C * patch_size * patch_size
         Returns:
-            total_loss: scalar tensor
-            parts: dict with 'mse' and 'lpips'
+            images: (B, T, C, H, W)
         """
-        # --- Handle video inputs (B,T,C,H,W) ---
-        if recon.dim() == 5:
-            B, T, C, H, W = recon.shape
-            # ensure channels come before spatial dims when flattening time
-            recon_2d  = recon.permute(0, 1, 2, 3, 4).contiguous().reshape(B * T, C, H, W)
-            target_2d = target.permute(0, 1, 2, 3, 4).contiguous().reshape(B * T, C, H, W)
-            if mask is not None:
-                if mask.dim() == 5:
-                    mask_2d = mask.contiguous().reshape(B * T, 1, H, W)
-                elif mask.dim() == 4:
-                    mask_2d = mask.unsqueeze(1).repeat(1, T, 1, 1, 1).reshape(B * T, 1, H, W)
-                else:
-                    mask_2d = None
-            else:
-                mask_2d = None
+        B, T, N, D = patches.shape
+        
+        # Reshape to (B*T, N, D)
+        patches_flat = patches.reshape(B * T, N, D)
+        
+        # Unpatchify each frame
+        frames = self.patchifier.unpatchify(
+            patches_flat,
+            frame_size=self.frame_size,
+            patch_size=self.patch_size
+        )  # (B*T, C, H, W)
+        
+        # Reshape back to (B, T, C, H, W)
+        C, H, W = frames.shape[1:]
+        images = frames.reshape(B, T, C, H, W)
+        
+        return images
+    
+    def forward(self, recon: torch.Tensor, target: torch.Tensor, mask: torch.Tensor = None) -> tuple:
+        """
+        Args:
+            recon: (B, T, N, D) patches in [0, 1] range
+            target: (B, T, N, D) patches in [0, 1] range
+            mask: Optional (B, T, N) mask (ignored for LPIPS, used for MSE)
+        
+        Returns:
+            tuple: (total_loss, loss_dict)
+                - total_loss: scalar tensor
+                - loss_dict: dict with 'mse', 'lpips', 'total' values
+        """
+        # Compute MSE loss on patches (with mask support)
+        mse_loss = self.mse_loss(recon, target, mask)
+        
+        # Convert patches to images for LPIPS
+        if self.patch_size is not None:
+            recon_images = self.unpatchify_batch(recon)  # (B, T, C, H, W)
+            target_images = self.unpatchify_batch(target)  # (B, T, C, H, W)
         else:
-            recon_2d, target_2d, mask_2d = recon, target, mask
-
-
-        # --- Compute losses ---
-        mse_val = self.mse_loss(recon, target, mask)
-        lpips_val = self.lpips_loss(recon_2d, target_2d, mask_2d)
-
-        total = (1.0 - self.alpha) * mse_val + self.alpha * lpips_val
-
-        return total, {'mse': mse_val.item(), 'lpips': lpips_val.item()}
-
+            # Already in image format
+            recon_images = recon
+            target_images = target
+        
+        # Reshape from (B, T, C, H, W) to (B*T, C, H, W) for LPIPS
+        B, T, C, H, W = recon_images.shape
+        recon_flat = recon_images.reshape(B * T, C, H, W)
+        target_flat = target_images.reshape(B * T, C, H, W)
+        
+        # Normalize to [-1, 1] for LPIPS
+        recon_normalized = recon_flat * 2 - 1
+        target_normalized = target_flat * 2 - 1
+        
+        # Clamp to ensure valid range
+        recon_normalized = recon_normalized.clamp(-1, 1)
+        target_normalized = target_normalized.clamp(-1, 1)
+        
+        # Compute LPIPS
+        lpips_values = self.lpips_fn(recon_normalized, target_normalized)  # (B*T, 1, 1, 1)
+        lpips_value = lpips_values.mean()
+        
+        # Combined loss
+        total_loss = mse_loss + self.lpips_weight * lpips_value
+        
+        return total_loss, {
+            'mse': mse_loss.item(),
+            'lpips': lpips_value.item(),
+            'total': total_loss.item()
+        }
