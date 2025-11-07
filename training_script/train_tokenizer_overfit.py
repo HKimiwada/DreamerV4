@@ -1,6 +1,11 @@
 """
 PYTHONPATH=. torchrun --nproc_per_node=1 training_script/train_tokenizer_overfit.py
 
+Debug list:
+11/05 (v2_overfit): Bounded output range to [0, 1] in CausalTokenizer using sigmoid.
+11/06 (v3_overfit): Compute loss on all patches (not just masked patches)
+11/06 (v4_overfit): Added positional encoding to CausalTokenizer.
+
 train_tokenizer.py but for one video to overfit and check if model architecture works.
 Target File: data/cheeky-cornflower-setter-0a5ba522405b-20220422-133010.mp4
 
@@ -50,9 +55,9 @@ class OverfitConfig:
     # Training
     batch_size = 1
     num_workers = 0  # 0 for overfitting (simpler debugging)
-    lr = 3e-4  # higher LR for faster overfitting
+    lr = 1e-4  # higher LR for faster overfitting
     weight_decay = 0.0  # no regularization when overfitting
-    max_epochs = 100
+    max_epochs = 20
     log_interval = 5
     
     # Visualization
@@ -66,7 +71,7 @@ class OverfitConfig:
     # WandB
     project = "DreamerV4-tokenizer-overfit"
     entity = "hiroki-kimiwada-"
-    run_name = "v1_overfit"
+    run_name = "v1_no_masking_overfit"
 
 # ---------------------------------------------------------------------------
 def save_best_checkpoint(model, optimizer, epoch, loss, cfg, best_loss):
@@ -193,7 +198,7 @@ def main():
         resize=cfg.resize,
         clip_length=cfg.clip_length,
         patch_size=cfg.patch_size,
-        mask_prob_range=(0.1, 0.9),
+        mask_prob_range=(0.0, 0.0),
         per_frame_mask_sampling=True,
         mode="random",
     )
@@ -257,7 +262,7 @@ def main():
             
             # Forward
             recon = model(patches, mask)
-            loss = criterion(recon, patches, mask.unsqueeze(-1))
+            loss = criterion(recon, patches, None)
             
             # Backward
             optimizer.zero_grad()
@@ -292,7 +297,7 @@ def main():
         })
         
         # --- save checkpoint if improved ---
-        best_loss = save_best_checkpoint(model, optimizer, epoch, avg_epoch_loss, cfg, best_loss)
+        # best_loss = save_best_checkpoint(model, optimizer, epoch, avg_epoch_loss, cfg, best_loss)
         
         # --- visualize reconstruction ---
         if epoch % cfg.visualize_interval == 0:
@@ -300,8 +305,9 @@ def main():
             viz_batch = next(iter(loader))
             visualize_reconstruction(model, viz_batch, cfg, epoch, device)
     
-    print(f"\n[Training Complete] Best loss: {best_loss:.6f}")
-    print(f"Best model saved at: {cfg.ckpt_dir / 'best_model.pt'}")
+    print(f"\n[Training Complete]")
+    # print(f"\n[Training Complete] Best loss: {best_loss:.6f}")
+    # print(f"Best model saved at: {cfg.ckpt_dir / 'best_model.pt'}")
     wandb.finish()
 
 # ---------------------------------------------------------------------------

@@ -99,6 +99,11 @@ class CausalTokenizer(nn.Module):
         self.decoder = nn.ModuleList(decoder_blocks)
 
         self.output_proj = nn.Linear(embed_dim, input_dim)
+        self.output_activation = nn.Sigmoid() # Bounds output to [0,1]
+
+        self.pos_embed = nn.Parameter(torch.zeros(1, 100000, embed_dim))
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
+        self._max_len = 100000
 
         # --- Optional FlashAttention (PyTorch >=2.1) ---
         self.use_flash_attention = hasattr(torch.nn.functional, "scaled_dot_product_attention")
@@ -139,6 +144,10 @@ class CausalTokenizer(nn.Module):
         # Flatten spatial+temporal dims
         x = x.view(B, T * N, self.embed_dim)
 
+        # Positional Encoding
+        seq_len = T * N
+        x = x + self.pos_embed[:, :seq_len, :]
+
         # Encoder stack
         x = self._run_stack(x, self.encoder)
 
@@ -154,4 +163,6 @@ class CausalTokenizer(nn.Module):
         # Reconstruct
         x = x.view(B, T, N, self.embed_dim)
         reconstructed_tokens = self.output_proj(x)
+        reconstructed_tokens = self.output_activation(reconstructed_tokens)
+
         return reconstructed_tokens
