@@ -319,4 +319,3 @@ class CausalTokenizer2(nn.Module):
         reconstructed_tokens = self.output_proj(x)
 
         return reconstructed_tokens
-    

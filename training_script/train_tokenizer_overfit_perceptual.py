@@ -1,11 +1,20 @@
 """
-Testing Perceptual Loss (LPIPS: 0.2 weight)
-CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python training_script/train_tokenizer_overfit_perceptual.py : LPIPS weight 0.2, Masking(0.0, 0.0)
-CUDA_VISIBLE_DEVICES=4 PYTHONPATH=. python training_script/train_tokenizer_overfit_perceptual.py : LPIPS weight 0.2, Masking(0.2, 0.5)
-CUDA_VISIBLE_DEVICES=6 PYTHONPATH=. python training_script/train_tokenizer_overfit_perceptual.py : LPIPS weight 0.2, Masking(0.5, 0.8)
-CUDA_VISIBLE_DEVICES=2 PYTHONPATH=. python training_script/train_tokenizer_overfit_perceptual.py : LPIPS weight 0.2, Masking(0.0, 0.0)
+CUDA_VISIBLE_DEVICES=5 PYTHONPATH=. python training_script/train_tokenizer_overfit_perceptual.py 
 
-CUDA_VISIBLE_DEVICES=1 PYTHONPATH=. python training_script/train_tokenizer_overfit_perceptual.py
+train_tokenizer.py but for one video to overfit and check if model architecture works.
+Target File: data/cheeky-cornflower-setter-0a5ba522405b-20220422-133010.mp4
+
+Overfit tokenizer on a single video to validate architecture and training.
+This script:
+  1. Loads ONE specific video
+  2. Trains the tokenizer to reconstruct it perfectly
+  3. Logs metrics and reconstructions to wandb
+  4. Saves checkpoints when loss improves
+
+Use this to verify that:
+  - Your model can learn (loss goes down)
+  - Reconstructions look visually correct
+  - No bugs in the training loop
 """
 import os
 from pathlib import Path
@@ -34,20 +43,20 @@ class OverfitConfig:
     clip_length = 8
     input_dim = 3 * patch_size * patch_size
     embed_dim = 512
-    latent_dim = 384
+    latent_dim = 256
     num_heads = 8
     num_layers = 18
     
     # Training
     batch_size = 1
     num_workers = 0  # 0 for overfitting (simpler debugging)
-    lr = 1e-4  # higher LR for faster overfitting
+    lr = 3e-4  # higher LR for faster overfitting
     weight_decay = 0.0  # no regularization when overfitting
-    max_epochs = 1500
+    max_epochs = 20
     log_interval = 5
     
     # Visualization
-    visualize_interval = 10  # visualize reconstructions every N epochs
+    visualize_interval = 5  # visualize reconstructions every N epochs
     num_frames_to_viz = 4  # how many frames to visualize
     
     # Loss configuration
@@ -56,13 +65,14 @@ class OverfitConfig:
     lpips_net = 'alex'  # 'alex', 'vgg', or 'squeeze'
 
     # Paths
-    ckpt_dir = Path("checkpoints/overfit/v5_overfit_mse")
-    viz_dir = Path("visualizations/v5_overfit_mse")
+    ckpt_dir = Path("checkpoints/overfit/v2_omplete_overfit_mse")
+    viz_dir = Path("visualizations/v2_complete_overfit_mse")
     
     # WandB
-    project = "11_09_Test_LPIPS_Masking"
+    project = "Complete_Tokenizer_Overfit"
     entity = "hiroki-kimiwada-"
-    run_name = "v5_run"  # Updated run name
+    run_name = "v2_mse"  # Lowered standard deviation for positional encoding.
+
 
 # ---------------------------------------------------------------------------
 def save_best_checkpoint(model, optimizer, epoch, loss, cfg, best_loss):

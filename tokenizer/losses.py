@@ -34,6 +34,68 @@ class MSELoss(nn.Module):
         else:
             return F.mse_loss(recon, target)
 
+class LPIPSLoss(nn.Module):
+    """
+    Learned Perceptual Image Patch Similarity (LPIPS) loss.
+    Expects inputs in range [-1, 1].
+    """
+    def __init__(self, lpips_net='alex', patch_size=None, frame_size=None):
+        super(LPIPSLoss, self).__init__()
+        self.lpips_fn = lpips.LPIPS(net=lpips_net).eval()
+        self.lpips_weight = lpips_weight
+        
+        # For unpatchifying
+        self.patch_size = patch_size
+        self.frame_size = frame_size
+        if patch_size is not None:
+            from tokenizer.patchify_mask import Patchifier
+            self.patchifier = Patchifier(patch_size=patch_size)
+        
+        # Freeze LPIPS network
+        for param in self.lpips_fn.parameters():
+            param.requires_grad = False
+    
+    def unpatchify_batch(self, patches: torch.Tensor) -> torch.Tensor:
+        """Convert (B, T, N, D) to (B, T, C, H, W) using Patchifier"""
+        B, T, N, D = patches.shape
+        
+        # Process each frame
+        all_frames = []
+        for b in range(B):
+            batch_frames = []
+            for t in range(T):
+                # Unpatchify single frame (1, N, D) -> (1, C, H, W)
+                frame = self.patchifier.unpatchify(
+                    patches[b:b+1, t], 
+                    frame_size=self.frame_size,
+                    patch_size=self.patch_size
+                )  # (1, C, H, W)
+                batch_frames.append(frame[0])  # (C, H, W)
+            all_frames.append(torch.stack(batch_frames))  # (T, C, H, W)
+        
+        images = torch.stack(all_frames)  # (B, T, C, H, W)
+        return images
+
+    def forward(self, recon: torch.Tensor, target: torch.Tensor, mask: torch.Tensor = None): 
+        # 1. Convert patches to images (both should already be in [0,1] from model)
+        recon_images = self.unpatchify_batch(recon)  # (B, T, C, H, W)
+        target_images = self.unpatchify_batch(target)  # (B, T, C, H, W)
+        
+        # 2. Reshape and normalize for LPIPS
+        B, T, C, H, W = recon_images.shape
+        recon_flat = recon_images.reshape(B * T, C, H, W)
+        target_flat = target_images.reshape(B * T, C, H, W)
+        
+        # Normalize to [-1, 1] for LPIPS
+        recon_normalized = (recon_flat * 2 - 1).clamp(-1, 1)
+        target_normalized = (target_flat * 2 - 1).clamp(-1, 1)
+        
+        # 3. Compute LPIPS
+        lpips_values = self.lpips_fn(recon_normalized, target_normalized)
+        lpips_loss = lpips_values.mean()
+        
+        return lpips_loss
+
 class CombinedLoss(nn.Module):
     def __init__(self, lpips_weight=0.1, lpips_net='alex', patch_size=None, frame_size=None):
         super().__init__()
@@ -53,55 +115,49 @@ class CombinedLoss(nn.Module):
         for param in self.lpips_fn.parameters():
             param.requires_grad = False
     
-    def unpatchify_batch(self, patches: torch.Tensor) -> torch.Tensor:  # FIXED INDENTATION
-        """Direct einops unpatchify - FIXED VERSION"""
+    def unpatchify_batch(self, patches: torch.Tensor) -> torch.Tensor:
+        """Convert (B, T, N, D) to (B, T, C, H, W) using Patchifier"""
         B, T, N, D = patches.shape
-        H, W = self.frame_size
-        ps = self.patch_size
-        C = 3
-        num_h = H // ps
-        num_w = W // ps
         
-        images = rearrange(
-            patches,
-            "b t (nh nw) (c ph pw) -> b t c (nh ph) (nw pw)",
-            nh=num_h, nw=num_w, c=C, ph=ps, pw=ps
-        )
+        # Process each frame
+        all_frames = []
+        for b in range(B):
+            batch_frames = []
+            for t in range(T):
+                # Unpatchify single frame (1, N, D) -> (1, C, H, W)
+                frame = self.patchifier.unpatchify(
+                    patches[b:b+1, t], 
+                    frame_size=self.frame_size,
+                    patch_size=self.patch_size
+                )  # (1, C, H, W)
+                batch_frames.append(frame[0])  # (C, H, W)
+            all_frames.append(torch.stack(batch_frames))  # (T, C, H, W)
         
+        images = torch.stack(all_frames)  # (B, T, C, H, W)
         return images
 
     def forward(self, recon: torch.Tensor, target: torch.Tensor, mask: torch.Tensor = None):
-        """
-        Args:
-            recon: (B, T, N, D) patches
-            target: (B, T, N, D) patches
-            mask: Optional (B, T, N) mask
-        """
         # 1. Compute MSE loss on patches
         mse_loss = self.mse_loss(recon, target, mask)
         
-        # 2. Ensure patches are in valid [0, 1] range BEFORE unpatchifying
-        recon = torch.sigmoid(recon) if recon.min() < 0 or recon.max() > 1 else recon
-        target = torch.clamp(target, 0, 1)  # Ensure target is valid too
-        
-        # 3. Convert patches to images for LPIPS
+        # 2. Convert patches to images (both should already be in [0,1] from model)
         recon_images = self.unpatchify_batch(recon)  # (B, T, C, H, W)
         target_images = self.unpatchify_batch(target)  # (B, T, C, H, W)
         
-        # 4. Reshape from (B, T, C, H, W) to (B*T, C, H, W) for LPIPS
+        # 3. Reshape and normalize for LPIPS
         B, T, C, H, W = recon_images.shape
         recon_flat = recon_images.reshape(B * T, C, H, W)
         target_flat = target_images.reshape(B * T, C, H, W)
         
-        # 5. Normalize to [-1, 1] for LPIPS (no clamping needed now)
-        recon_normalized = recon_flat * 2 - 1
-        target_normalized = target_flat * 2 - 1
+        # Normalize to [-1, 1] for LPIPS
+        recon_normalized = (recon_flat * 2 - 1).clamp(-1, 1)
+        target_normalized = (target_flat * 2 - 1).clamp(-1, 1)
         
-        # 6. Compute LPIPS
+        # 4. Compute LPIPS
         lpips_values = self.lpips_fn(recon_normalized, target_normalized)
         lpips_value = lpips_values.mean()
         
-        # 7. Combined loss
+        # 5. Combined loss
         total_loss = mse_loss + self.lpips_weight * lpips_value
         
         return total_loss, {

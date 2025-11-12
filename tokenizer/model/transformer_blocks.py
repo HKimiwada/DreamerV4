@@ -27,7 +27,7 @@ class FeedForward(nn.Module):
         # Project up to 2 * hidden_size for splitting
         self.up = nn.Linear(input_size, 2 * hidden_size)
         self.down = nn.Linear(hidden_size, input_size)
-        self.dropout = nn.Dropout(0.1)
+        self.dropout = nn.Dropout(0.0)
     
     def forward(self, x):
         # Split the projection into two halves
@@ -52,7 +52,7 @@ class MultiHeadAttention(nn.Module):
         self.w_k = nn.Linear(input_size, input_size) # Key projection
         self.w_v = nn.Linear(input_size, input_size) # Value projection
         self.w_out = nn.Linear(input_size, input_size) # Output projection
-        self.dropout = nn.Dropout(0.1)
+        self.dropout = nn.Dropout(0.0)
         self.causal = causal # whether to apply temporal causal masking (not allow model to attend future frames)
   
     def _causal_masking_function(self, seq_len):
@@ -94,8 +94,8 @@ class BlockCausalTransformer2(nn.Module):
     - Spatial layers: full attention within each frame
     - Temporal layers: causal attention across time
     
-    Each block maintains separate positional embeddings for spatial and temporal dimensions
-    to preserve positional information after factorization.
+    Positional embeddings are handled by the main model (CausalTokenizer),
+    not within individual transformer blocks.
     """
     def __init__(self, input_size, num_heads, causal_time: bool):
         super().__init__()
@@ -105,14 +105,6 @@ class BlockCausalTransformer2(nn.Module):
         self.ffn = FeedForward(input_size, hidden_size=int(4*input_size))
         self.causal_time = causal_time
         self.input_size = input_size
-        
-        # Positional embeddings for factorized attention
-        # Spatial: positions within a frame (max 10000 patches per frame)
-        # Temporal: positions across time (max 1000 frames)
-        self.spatial_pos_embed = nn.Parameter(torch.zeros(1, 10000, input_size))
-        self.temporal_pos_embed = nn.Parameter(torch.zeros(1, 1000, input_size))
-        nn.init.trunc_normal_(self.spatial_pos_embed, std=0.02)
-        nn.init.trunc_normal_(self.temporal_pos_embed, std=0.02)
        
     def forward(self, x, T=None, N=None):
         """
@@ -139,9 +131,6 @@ class BlockCausalTransformer2(nn.Module):
             # Reshape to (B, T, N, D) then (B*T, N, D)
             x = x.view(B, T, N, D)
             
-            # Add spatial positional embeddings (broadcast across time dimension)
-            x = x + self.spatial_pos_embed[:, :N, :].unsqueeze(1)  # (1, 1, N, D) broadcasts to (B, T, N, D)
-            
             # Flatten temporal dimension into batch for independent frame processing
             x_reshaped = x.reshape(B * T, N, D)
             
@@ -162,9 +151,6 @@ class BlockCausalTransformer2(nn.Module):
             # TEMPORAL LAYER: attend across time (causal)
             # Reshape to (B, T, N, D) then permute to (B, N, T, D)
             x = x.view(B, T, N, D).permute(0, 2, 1, 3)  # (B, N, T, D)
-            
-            # Add temporal positional embeddings (broadcast across spatial dimension)
-            x = x + self.temporal_pos_embed[:, :T, :].unsqueeze(1)  # (1, 1, T, D) broadcasts to (B, N, T, D)
             
             # Flatten spatial dimension into batch for per-position temporal processing
             x_reshaped = x.reshape(B * N, T, D)
