@@ -1,4 +1,5 @@
 """
+# Working Code
 PYTHONPATH=. torchrun --nproc_per_node=8 training_script/train_tokenizer_ddp.py
 """
 import os
@@ -21,7 +22,7 @@ from tokenizer.patchify_mask import Patchifier
 # ---------------------------------------------------------------------------
 class OverfitConfig:
     # Target video
-    target_video = "cheeky-cornflower-setter-0a5ba522405b-20220422-133010.mp4"
+    target_video = "cheeky-cornflower-setter-02e496ce4abb-20220421-092639.mp4"
     data_dir = Path("data")
     
     # Model architecture
@@ -32,7 +33,7 @@ class OverfitConfig:
     embed_dim = 512
     latent_dim = 256
     num_heads = 16
-    num_layers = 18
+    num_layers = 20
     
     # Training
     batch_size = 1
@@ -52,14 +53,13 @@ class OverfitConfig:
     lpips_net = "alex"
 
     # Paths
-    ckpt_dir = Path("checkpoints/overfit/complete_overfit_mse")
-    viz_dir = Path("visualizations/complete_overfit_mse")
+    ckpt_dir = Path("checkpoints/overfit/latest_complete_overfit_mse")
+    viz_dir = Path("visualizations/latest_complete_overfit_mse")
     
     # WandB
     project = "Complete_Tokenizer_Overfit"
     entity = "hiroki-kimiwada-"
-    run_name = "v1_mse_ddp"
-
+    run_name = "latest_mse_ddp"
 
 # ---------------------------------------------------------------------------
 def setup_ddp():
