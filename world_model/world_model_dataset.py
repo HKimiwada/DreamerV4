@@ -1,4 +1,5 @@
-# Building LatentDataset class to feed world model.
+# Building LatentSequenceDataset class to feed world model.
+# LatentSequenceDataset loads {"z": <T,N,latent_dim>, "length": T}
 import torch
 from torch.utils.data import Dataset
 from pathlib import Path
@@ -20,3 +21,9 @@ class LatentSequenceDataset(Dataset):
         if T < self.context:
             pad = self.context - T
             z = torch.cat([z, z[-1:].repeat(pad,1,1)], dim=0)
+
+        z = z[:self.context]
+        return z.float()
+
+    def __len__(self):
+        return len(self.files)

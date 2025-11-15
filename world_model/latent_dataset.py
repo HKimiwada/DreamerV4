@@ -1,6 +1,7 @@
 # Freeze tokenizer & Create latent dataset
 # Generate latent sequences z1,...,zT for input videos. 
 # World Model = Causal ViT trained on these WM with short-cut forcing. 
+# Latent Token: (T, N, D) -> T is the number of frames per clip, N is the number of tokens per frame, D is the dimension of the latent token
 import os
 import torch
 import torch.nn as nn
