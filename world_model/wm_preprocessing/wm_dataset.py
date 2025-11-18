@@ -1,5 +1,6 @@
 # Combining latent token + action description to create input to WM.
 # python world_model/wm_preprocessing/wm_dataset.py
+# Dataset is currently unbatched
 import os
 import json
 from pathlib import Path

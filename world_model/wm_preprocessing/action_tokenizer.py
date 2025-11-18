@@ -1,9 +1,11 @@
 # ActionTokenizer: converts raw action components (mouse, keyboard, scroll, hotbar) into transformer tokens.
 # Tokenizer trained along-side world model.
+# python world_model/wm_preprocessing/action_tokenizer.py
 import torch
 import torch.nn as nn
+from world_model.wm_preprocessing.wm_dataset import WorldModelDataset
 
-class ActionTokenizer(nn.module):
+class ActionTokenizer(nn.Module):
     """
     Dreamer4-style simplified multi-token action encoder.
 
@@ -17,16 +19,17 @@ class ActionTokenizer(nn.module):
         hotbar:    (B, T) long
 
     OUTPUT:
-        action_tokens: (B, T, Sa=4, D_model)
+        action_tokens: (B, T, Sa=4, D_model) # 3D if input not batched. 
     """
     def __init__(
-        self, d_model: int, 
+        self, 
+        d_model: int, 
         mouse_cat_vocab: int = 121, 
         scroll_vocab: int = 3, 
         hotbar_vocab: int = 9,
         num_keys: int = 23,
         num_buttons: int =3,
-    )
+    ):
         super().__init__()
         self.Sa = 4
         self.d_model = d_model
@@ -52,6 +55,10 @@ class ActionTokenizer(nn.module):
         """
         Returns: (B, T, Sa, D_model): Batch, Token clip length, Sa (action token from tokenizer), model dim.
         """
+        unbatched = actions["mouse_cat"].dim() == 1
+        if unbatched:
+            actions = {k: v.unsqueeze(0) for k, v in actions.items()}
+
         mouse_cat = actions["mouse_cat"]   # (B,T)
         scroll    = actions["scroll"]      # (B,T)
         buttons   = actions["buttons"]     # (B,T,3)
@@ -87,6 +94,46 @@ class ActionTokenizer(nn.module):
         slot_emb = self.slot_embed(slot_ids)[None, None, :, :]   # (1,1,Sa,D)
         tokens = tokens + slot_emb
 
+        if unbatched:
+            tokens = tokens.squeeze(0)
+
         return tokens
 
+def main():
+    dataset = WorldModelDataset(
+        latent_dir="data/latent_sequences",
+        action_jsonl="data/actions.jsonl",
+        clip_length=8,
+        device="cuda" if torch.cuda.is_available() else "cpu"
+    )
 
+    print("\nTotal clips:", len(dataset))
+
+    # Test first item
+    sample = dataset[0]
+    lat = sample["latents"]
+    act = sample["actions"]
+
+    print("\n--- FIRST SAMPLE ---")
+    print("latents:", lat.shape)      # expect (T, N, D)
+    print("mouse_cat:", act["mouse_cat"].shape)
+    print("scroll:", act["scroll"].shape)
+    print("yaw_pitch:", act["yaw_pitch"].shape)
+    print("hotbar:", act["hotbar"].shape)
+    print("gui:", act["gui"].shape)
+    print("buttons:", act["buttons"].shape)
+    print("keys:", act["keys"].shape)
+
+    print("\nLatents device:", lat.device)
+    print("Buttons example:", act["buttons"][0])
+
+    # Testing ActionTokenizer
+    tokenizer = ActionTokenizer(100).to(lat.device)
+    print("Testing ActionTokenizer:")
+    for i in range(1):
+        action_token = tokenizer(act)
+        print("Shape of action_token: ", action_token.shape)
+        print("Content: ", action_token)
+
+if __name__ == "__main__":
+    main()
