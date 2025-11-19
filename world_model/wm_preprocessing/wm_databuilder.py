@@ -1,5 +1,5 @@
 # Data Builder to prepare data for input into World Model (WM).
-# PYTHONPATH=. python world_model/wm/wm_databuilder.py
+# python world_model/wm_preprocessing/wm_databuilder.py
 # Input: latent tokens, numerically-converted actions (from wm_dataset)
 # Output: (latent tokens, tokenized actions, register tokens, short cut token) for each timestep
 import math

@@ -27,7 +27,7 @@ import numpy as np
 import imageio.v2 as imageio
 
 from tokenizer.tokenizer_dataset import TokenizerDatasetDDP
-from tokenizer.model.encoder_decoder import CausalTokenizer2
+from tokenizer.model.encoder_decoder import CausalTokenizer
 from tokenizer.losses import MSELoss, CombinedLoss
 from tokenizer.patchify_mask import Patchifier
 
@@ -291,7 +291,7 @@ def main():
     )
     
     # --- model ---
-    model = CausalTokenizer2(
+    model = CausalTokenizer(
         input_dim=cfg.input_dim,
         embed_dim=cfg.embed_dim,
         num_heads=cfg.num_heads,
