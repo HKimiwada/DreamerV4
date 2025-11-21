@@ -151,7 +151,6 @@ def visualize_reconstruction(model, batch, cfg, epoch, device):
     wandb.log({"visualization": wandb.Image(final_img, caption=f"Epoch {epoch}")})
     model.train()
 
-
 # ---------------------------------------------------------------------------
 def main():
     cfg = OverfitConfig()

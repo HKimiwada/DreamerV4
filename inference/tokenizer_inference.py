@@ -4,7 +4,7 @@ import imageio
 import numpy as np
 from pathlib import Path
 
-from tokenizer.model.encoder_decoder import CausalTokenizer2
+from tokenizer.model.encoder_decoder import CausalTokenizer
 from tokenizer.patchify_mask import Patchifier
 from tokenizer.tokenizer_dataset import TokenizerDatasetWM
 
@@ -33,7 +33,7 @@ class InferenceConfig:
 # ----------------------------------------------------------------------------
 def load_model(cfg):
     print(f"[Load] Loading checkpoint: {cfg.ckpt_path}")
-    model = CausalTokenizer2(
+    model = CausalTokenizer(
         input_dim=cfg.input_dim,
         embed_dim=cfg.embed_dim,
         num_heads=cfg.num_heads,
