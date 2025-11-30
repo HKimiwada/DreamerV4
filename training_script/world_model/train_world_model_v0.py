@@ -2,6 +2,7 @@
 # python training_script/world_model/train_world_model_v0.py
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import wandb
 import numpy as np
 from pathlib import Path
@@ -11,7 +12,7 @@ from tokenizer.patchify_mask import Patchifier
 from world_model.wm_preprocessing.wm_dataset import WorldModelDataset
 from world_model.wm_preprocessing.wm_databuilder import DataBuilderWM
 from world_model.wm.dynamics_model import WorldModel
-from world_model.wm.loss import flow_loss_v1   
+from world_model.wm.loss import flow_loss_v2   
 
 # Define constants needed for decoding
 PATCH_SIZE = 16
@@ -57,130 +58,182 @@ def load_tokenizer(cfg):
 @torch.no_grad()
 def decode_latents(tokenizer, latents):
     """
-    latents: (1, N_latents, D_latent) - representing ONE frame's worth of tokens
-    returns (1, 3, H, W)
+    Decode latents back to image using tokenizer decoder.
+    latents: (1, N, D_latent) - single frame
+    returns: (1, 3, H, W)
     """
-    # 1. Project latents back to embed_dim
-    x = tokenizer.from_latent(latents)     # (1, N, embed_dim)
-
-    # 2. Add pos embedding
-    seq_len = x.shape[1]
-    # Ensure we slice pos_embed correctly (1, seq_len, D)
-    x = x + tokenizer.pos_embed[:, :seq_len, :]
-
-    # 3. Flatten for decoder
-    x = x.view(1, seq_len, tokenizer.embed_dim)
-
-    # 4. Run decoder
-    x = tokenizer._run_stack(x, tokenizer.decoder, T=1, N=seq_len)
-
-    # 5. Unproject to patch tokens
-    patches = tokenizer.output_proj(x).view(1, seq_len, -1)
-
-    # 6. Unpatchify → image
+    # Project from latent space back to model space
+    x = tokenizer.from_latent(latents)  # (1, N, embed_dim)
+     
+    # Run decoder
+    x = tokenizer._run_stack(x, tokenizer.decoder, T=1, N=x.shape[1])
+    
+    # Project to patch tokens
+    patches = tokenizer.output_proj(x)  # (1, N, patch_dim)
+    
+    # Unpatchify
     patchifier = Patchifier(PATCH_SIZE)
     H, W = RESIZE
-    frame = patchifier.unpatchify(patches, (H, W), PATCH_SIZE)[0]  # (3,H,W)
-
-    return frame.unsqueeze(0)
+    frame = patchifier.unpatchify(patches, (H, W), PATCH_SIZE)[0]  # (3, H, W)
+    
+    return frame.unsqueeze(0).clamp(0, 1)
 
 @torch.no_grad()
 def visualize_world_model(world_model, data_builder, sample, tokenizer, step, device, num_frames=4):
+    """
+    Simple single-step visualization for debugging world model training.
+    
+    Shows:
+    1. Ground truth (clean) frames
+    2. Corrupted frames (what the model sees as input)
+    3. Model's prediction (denoised output)
+    
+    This tests the model's ability to denoise at a FIXED tau level,
+    making it easy to track improvement over training.
+    
+    Args:
+        world_model: trained WorldModel instance
+        data_builder: DataBuilderWM instance
+        sample: dict with 'latents' and 'actions' from dataset
+        tokenizer: CausalTokenizer for decoding latents to images
+        step: current training step (for logging)
+        device: torch device
+        num_frames: number of frames to visualize (default 4)
+    """
     world_model.eval()
-
-    # 1. Prepare Ground Truth
-    latents = sample["latents"]      # (B, T, N, D)
-    actions = sample["actions"]
     
-    B, T_seq, N_latents, D_latent = latents.shape
-
-    # 2. Initialize Autoregressive Canvas
-    # Start with pure noise for the entire sequence. We will fill this in frame-by-frame.
-    z_current = torch.randn_like(latents)
+    # Extract data from sample
+    latents = sample["latents"]  # (T, N, D_latent)
+    actions = sample["actions"]  # dict of action tensors
     
-    # Initialize metadata: 
-    # tau=0 (Generation) for future frames
-    # tau=1 (Context) for past frames (updated in loop)
-    tau_map = torch.zeros(B, T_seq, device=device)
-    d_map = torch.ones(B, T_seq, device=device) # Predict full step (d=1)
-
-    pred_frames = []
+    # Add batch dimension if needed
+    if latents.dim() == 3:
+        latents = latents.unsqueeze(0)  # (1, T, N, D_latent)
+        actions = {k: v.unsqueeze(0) for k, v in actions.items()}
     
-    # 3. Autoregressive Rollout Loop
-    # We generate Frame t using the history of Frames 0...t-1
-    for t in range(T_seq):
-        
-        # --- A. Construct Inputs for Step t ---
-        # Get base tokens (Actions, Registers) from data_builder
-        # (We use the structure it creates, then overwrite the dynamic parts)
-        wm_inp = data_builder(latents, actions)
-        
-        # Reshape flat tokens to (B, T, L_total, D) for editing
-        wm_tokens = wm_inp["wm_input_tokens"]
-        L_total = wm_tokens.shape[1] // T_seq
-        wm_tokens = wm_tokens.view(B, T_seq, L_total, -1)
-        
-        # OVERWRITE 1: Latents (first N tokens)
-        # We replace the ground truth with our current canvas (Mixed Noise + Predictions)
-        z_current_proj = data_builder.latent_project(z_current)
-        wm_tokens[:, :, :N_latents, :] = z_current_proj
-        
-        # OVERWRITE 2: Shortcut Token (last 1 token)
-        # We manually build the token to tell the model: "Past is clean (tau=1), Current is noise (tau=0)"
-        feat = torch.stack([tau_map, d_map], dim=-1) # (B, T, 2)
-        shortcut_embed = data_builder.shortcut_mlp(feat) + data_builder.shortcut_slot.view(1, 1, -1)
-        wm_tokens[:, :, -1:, :] = shortcut_embed.unsqueeze(2)
-        
-        # Flatten back for Transformer
-        wm_inp["wm_input_tokens"] = wm_tokens.view(B, T_seq * L_total, -1)
-        # Update metadata (optional, purely for consistency)
-        wm_inp["tau"] = tau_map 
-
-        # --- B. Forward Pass ---
-        # Predict all frames (Transformer handles causal masking)
-        # We only care about the prediction for the current frame 't'
-        preds = world_model(wm_inp) # (B, T, N, D)
-        pred_t = preds[:, t]        # (B, N, D)
-        
-        pred_frames.append(pred_t)
-        
-        # --- C. Update State for Next Step ---
-        if t < T_seq - 1:
-            # Update Canvas: Feed this prediction back as "History" for the next step
-            z_current[:, t] = pred_t
-            # Update Conditioning: Mark this frame as "Context" (tau=1) so model attends to it
-            tau_map[:, t] = 1.0 
-
-    # 4. Decode and Visualization
-    # Stack predictions along time dimension
-    pred_z = torch.stack(pred_frames, dim=1) # (B, T, N, D)
-    z_clean = latents
-
-    # Remove batch dim if B=1 for easier slicing
-    if B == 1:
-        pred_z = pred_z[0]
-        z_clean = z_clean[0]
-
-    # Select frames to visualize
-    idxs = np.linspace(0, T_seq - 1, num_frames, dtype=int)
+    latents = latents.to(device)
+    actions = {k: v.to(device) for k, v in actions.items()}
+    
+    B, T, N, D_latent = latents.shape
+    
+    # ============================================================
+    # FIXED TAU/D FOR CONSISTENT EVALUATION
+    # ============================================================
+    # Use tau=0.5 (50% signal, 50% noise) for visualization
+    # This gives a good balance - not too easy, not impossible
+    tau_fixed = torch.full((B, T), 0.5, device=device)
+    d_fixed = torch.full((B,), 0.25, device=device)
+    
+    # ============================================================
+    # MANUALLY CREATE CORRUPTED LATENTS
+    # ============================================================
+    # z_corrupted = (1 - tau) * noise + tau * z_clean
+    noise = torch.randn_like(latents)
+    tau_expanded = tau_fixed.unsqueeze(-1).unsqueeze(-1)  # (B, T, 1, 1)
+    z_corrupted = (1.0 - tau_expanded) * noise + tau_expanded * latents
+    
+    # ============================================================
+    # BUILD WORLD MODEL INPUT WITH FIXED TAU
+    # ============================================================
+    # We need to manually construct the input tokens because we want
+    # to use our fixed tau/d, not randomly sampled ones
+    
+    # Project corrupted latents to model dimension
+    z_corrupted_proj = data_builder.latent_project(z_corrupted)  # (B, T, N, D_model)
+    
+    # Get action tokens
+    action_tokens = data_builder.action_tokenizer(actions)  # (B, T, Sa, D_model)
+    Sa = action_tokens.shape[2]
+    
+    # Get register tokens
+    Sr = data_builder.register_tokens
+    register_ids = torch.arange(Sr, device=device)
+    reg_base = data_builder.register_embed(register_ids)  # (Sr, D_model)
+    reg_base = reg_base.view(1, 1, Sr, data_builder.d_model)
+    register_tokens = reg_base.expand(B, T, Sr, data_builder.d_model)
+    
+    # Build shortcut tokens from fixed (tau, d)
+    d_expanded = d_fixed.view(B, 1).expand(B, T)  # (B, T)
+    feat = torch.stack([tau_fixed, d_expanded], dim=-1)  # (B, T, 2)
+    shortcut_vec = data_builder.shortcut_mlp(feat)  # (B, T, D_model)
+    shortcut_vec = shortcut_vec + data_builder.shortcut_slot.view(1, 1, -1)
+    shortcut_tokens = shortcut_vec.unsqueeze(2)  # (B, T, 1, D_model)
+    
+    # Concatenate all tokens
+    wm_tokens = torch.cat([
+        z_corrupted_proj,  # Corrupted latents
+        action_tokens,     # Actions
+        register_tokens,   # Registers
+        shortcut_tokens    # Shortcut (tau, d)
+    ], dim=2)  # (B, T, N+Sa+Sr+1, D_model)
+    
+    B, T, L_total, D_model = wm_tokens.shape
+    wm_input_tokens = wm_tokens.view(B, T * L_total, D_model)
+    
+    # Create input dict for world model
+    wm_input = {
+        "wm_input_tokens": wm_input_tokens,
+        "tau": tau_fixed,
+        "d": d_fixed,
+        "z_clean": latents,
+        "z_corrupted": z_corrupted,
+    }
+    
+    # ============================================================
+    # FORWARD PASS
+    # ============================================================
+    pred_z = world_model(wm_input)  # (B, T, N, D_latent)
+    
+    # ============================================================
+    # SELECT FRAMES TO VISUALIZE
+    # ============================================================
+    num_frames = min(num_frames, T)
+    frame_indices = np.linspace(0, T - 1, num_frames, dtype=int)
+    
+    # ============================================================
+    # DECODE LATENTS TO IMAGES
+    # ============================================================
     rows = []
+    for t in frame_indices:
+        # Ground truth frame
+        gt_frame = decode_latents(tokenizer, latents[0, t:t+1])  # (1, 3, H, W)
+        
+        # Corrupted frame (what model sees)
+        corrupted_frame = decode_latents(tokenizer, z_corrupted[0, t:t+1])  # (1, 3, H, W)
+        
+        # Model's prediction
+        pred_frame = decode_latents(tokenizer, pred_z[0, t:t+1])  # (1, 3, H, W)
+        
+        # Convert to numpy arrays (RGB, 0-255)
+        gt_np = (gt_frame[0].permute(1, 2, 0).cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
+        corr_np = (corrupted_frame[0].permute(1, 2, 0).cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
+        pred_np = (pred_frame[0].permute(1, 2, 0).cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
+        
+        # Concatenate horizontally: [GT | Corrupted | Prediction]
+        row = np.concatenate([gt_np, corr_np, pred_np], axis=1)
+        rows.append(row)
     
-    for t_idx in idxs:
-        # Decode Ground Truth
-        gt_img = decode_latents(tokenizer, z_clean[t_idx:t_idx+1])
-        # Decode Prediction
-        pred_img = decode_latents(tokenizer, pred_z[t_idx:t_idx+1])
-
-        # Convert to Numpy Image
-        gt_np = (gt_img[0].permute(1,2,0).cpu().numpy() * 255).astype(np.uint8)
-        pred_np = (pred_img[0].permute(1,2,0).cpu().numpy() * 255).astype(np.uint8)
-
-        # Concatenate: [GT | Prediction]
-        rows.append(np.concatenate([gt_np, pred_np], axis=1))
-
+    # Stack all frames vertically
     final_img = np.concatenate(rows, axis=0)
     
-    wandb.log({"wm_reconstruction": wandb.Image(final_img, caption=f"Step {step} (AR)")})
+    # ============================================================
+    # LOG TO WANDB
+    # ============================================================
+    wandb.log({
+        "reconstruction": wandb.Image(
+            final_img, 
+            caption=f"Step {step} | GT | Corrupted (τ=0.5) | Prediction"
+        ),
+        "step": step
+    })
+    
+    # Optional: Compute and log reconstruction metrics
+    with torch.no_grad():
+        mse_loss = F.mse_loss(pred_z, latents)
+        wandb.log({
+            "viz/mse_reconstruction": mse_loss.item(),
+            "step": step
+        })
     
     world_model.train()
 
@@ -211,7 +264,7 @@ def train_overfit():
 
     d_model = 512
     d_latent = 256
-    data_builder = DataBuilderWM(d_model).to(device)
+    data_builder = DataBuilderWM(d_model, d_latent=d_latent).to(device)
     world_model = WorldModel(
         d_model=d_model,
         d_latent=d_latent,
@@ -219,59 +272,79 @@ def train_overfit():
         num_heads=8
     ).to(device)
 
+    # Combine parameters for optimization
+    params = list(world_model.parameters()) + list(data_builder.parameters())
+    
     optimizer = torch.optim.AdamW(
-        list(world_model.parameters()) + list(data_builder.parameters()), 
-        lr=1e-4,
+        params,
+        lr=1e-4,  # Lower learning rate for stability
+        weight_decay=0.01  # Add weight decay for regularization
+    )
+    
+    # Add learning rate scheduler
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, 
+        T_max=10000, 
+        eta_min=1e-6
     )
 
     wandb.init(
-        project="worldmodel-v0",
+        project="worldmodel-v0-fixed",
         config={
             "d_model": d_model,
             "d_latent": d_latent,
             "num_layers": 16,
             "num_heads": 8,
-            "lr": 1e-3
+            "lr": 1e-4,
+            "loss_type": "x-prediction"
         }
     )
 
-    # Training Loop
-    print("world_model: training start")
     world_model.train()
-    print("data_builder: training start")
     data_builder.train()
 
-    for step in range(10000): # Increased steps to ensure we see visualization
+    for step in range(10000):
         for sample in loader:
-
             latents = sample["latents"]       
             actions = sample["actions"]
 
             # Build world-model input
             wm_input = data_builder(latents, actions)
 
-            # Forward pass
-            pred_z = world_model(wm_input)
+            # Forward pass - model predicts CLEAN latents
+            pred_z_clean = world_model(wm_input)
 
-            # Flow-matching loss (MSE)
-            loss = flow_loss_v1(
-                pred_z,       
-                wm_input["z_clean"],
-                wm_input["tau"]
+            # X-prediction loss: compare prediction to ground truth clean latents
+            loss = flow_loss_v2(
+                pred_z_clean,
+                wm_input["z_clean"],  # Ground truth clean latents
+                wm_input["tau"],       # Signal levels
+                ramp_weight=True       # Weight by tau
             )
 
+            # Backward pass with gradient clipping
             optimizer.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(params, max_norm=1.0)  # Prevent exploding gradients
             optimizer.step()
+            scheduler.step()
             
-        if step % cfg.visualize_interval == 0:
+        # Logging
+        if step % 10 == 0:
+            wandb.log({
+                "loss": loss.item(),
+                "lr": scheduler.get_last_lr()[0],
+                "step": step
+            })
             print(f"[step {step}] loss = {loss.item():.6f}")
-            print("Testing visualization...")
-            visualize_world_model(world_model, data_builder, sample, tokenizer, step=step, device=device)
         
-        wandb.log({"flow_loss": loss.item(), "step": step})
+        # Visualization
+        if step % cfg.visualize_interval == 0:
+            visualize_world_model(
+                world_model, data_builder, sample, tokenizer, step, device
+            )
 
-    print("Completed Training")
+    print("Training complete!")
 
 if __name__ == "__main__":
     train_overfit()

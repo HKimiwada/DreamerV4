@@ -37,14 +37,64 @@ def flow_loss_v1(pred_z_clean, z_clean, tau):
     # w = (0.1 + 0.9 * tau).unsqueeze(-1).unsqueeze(-1)
 
     # 3. Uniform weighting to force generation learning (for overfitting on small frames)
-    print("Using uniform weighting for flow loss.\n")
-    w = torch.ones_like(tau).unsqueeze(-1).unsqueeze(-1)
+    # print("Using uniform weighting for flow loss.\n")
+    # w = torch.ones_like(tau).unsqueeze(-1).unsqueeze(-1)
+    w = (1.0 - tau).unsqueeze(-1).unsqueeze(-1) + 0.1
 
     weighted_error = w * sq_error
 
     # 4. Mean over all axes
     loss = weighted_error.mean()
 
+    return loss
+
+def flow_loss_v2(pred_z_clean, z_clean, tau, ramp_weight=True):
+    """
+    X-prediction flow matching loss.
+    
+    The model predicts clean latents z_clean directly from corrupted input.
+    This is simpler and more stable than v-prediction.
+    
+    Args:
+        pred_z_clean: (B, T, N, D) - model's prediction of CLEAN latents
+        z_clean: (B, T, N, D) - ground truth clean latents
+        tau: (B, T) - signal levels (tau=0 is noise, tau=1 is clean)
+        ramp_weight: whether to weight loss by tau (prioritize denoising high-signal frames)
+    
+    Returns:
+        loss: scalar
+    """
+    # Handle unbatched input
+    if pred_z_clean.dim() == 3:
+        pred_z_clean = pred_z_clean.unsqueeze(0)
+    if z_clean.dim() == 3:
+        z_clean = z_clean.unsqueeze(0)
+    if tau.dim() == 1:
+        tau = tau.unsqueeze(0)
+    
+    B, T, N, D = pred_z_clean.shape
+    
+    # Ensure shapes match
+    if z_clean.shape[2] != N:
+        z_clean = z_clean[:, :, :N, :]
+    
+    # MSE between prediction and clean target
+    sq_error = (pred_z_clean - z_clean).pow(2)  # (B, T, N, D)
+    
+    if ramp_weight:
+        # Weight by signal level: focus on frames with more signal
+        # w(tau) = 0.1 + 0.9*tau
+        # tau=0 (pure noise) → w=0.1 (low weight)
+        # tau=1 (clean) → w=1.0 (full weight)
+        w = 0.1 + 0.9 * tau  # (B, T)
+        w = w.unsqueeze(-1).unsqueeze(-1)  # (B, T, 1, 1)
+        weighted_error = w * sq_error
+    else:
+        weighted_error = sq_error
+    
+    # Mean over all dimensions
+    loss = weighted_error.mean()
+    
     return loss
 
 def test():
