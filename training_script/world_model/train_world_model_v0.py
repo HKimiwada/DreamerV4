@@ -115,26 +115,20 @@ def visualize_world_model(world_model, data_builder, sample, tokenizer, step, de
     actions = {k: v.to(device) for k, v in actions.items()}
     
     B, T, N, D_latent = latents.shape
-    
-    # ============================================================
-    # FIXED TAU/D FOR CONSISTENT EVALUATION
-    # ============================================================
+
+    # Fixed Tau/D for consistent evaluation
     # Use tau=0.5 (50% signal, 50% noise) for visualization
     # This gives a good balance - not too easy, not impossible
     tau_fixed = torch.full((B, T), 0.5, device=device)
     d_fixed = torch.full((B,), 0.25, device=device)
     
-    # ============================================================
-    # MANUALLY CREATE CORRUPTED LATENTS
-    # ============================================================
+    # Manually create corrupted latents at fixed tau
     # z_corrupted = (1 - tau) * noise + tau * z_clean
     noise = torch.randn_like(latents)
     tau_expanded = tau_fixed.unsqueeze(-1).unsqueeze(-1)  # (B, T, 1, 1)
     z_corrupted = (1.0 - tau_expanded) * noise + tau_expanded * latents
     
-    # ============================================================
-    # BUILD WORLD MODEL INPUT WITH FIXED TAU
-    # ============================================================
+    # Build World Model Input
     # We need to manually construct the input tokens because we want
     # to use our fixed tau/d, not randomly sampled ones
     
@@ -179,20 +173,14 @@ def visualize_world_model(world_model, data_builder, sample, tokenizer, step, de
         "z_corrupted": z_corrupted,
     }
     
-    # ============================================================
-    # FORWARD PASS
-    # ============================================================
+    # Forward pass through world model
     pred_z = world_model(wm_input)  # (B, T, N, D_latent)
     
-    # ============================================================
-    # SELECT FRAMES TO VISUALIZE
-    # ============================================================
+    # Select frames to visualize
     num_frames = min(num_frames, T)
     frame_indices = np.linspace(0, T - 1, num_frames, dtype=int)
     
-    # ============================================================
-    # DECODE LATENTS TO IMAGES
-    # ============================================================
+    # Decode and assemble visualization grid
     rows = []
     for t in frame_indices:
         # Ground truth frame
@@ -216,9 +204,7 @@ def visualize_world_model(world_model, data_builder, sample, tokenizer, step, de
     # Stack all frames vertically
     final_img = np.concatenate(rows, axis=0)
     
-    # ============================================================
-    # LOG TO WANDB
-    # ============================================================
+    # Log to wandb
     wandb.log({
         "reconstruction": wandb.Image(
             final_img, 
@@ -227,7 +213,7 @@ def visualize_world_model(world_model, data_builder, sample, tokenizer, step, de
         "step": step
     })
     
-    # Optional: Compute and log reconstruction metrics
+    # Compute and log reconstruction metrics
     with torch.no_grad():
         mse_loss = F.mse_loss(pred_z, latents)
         wandb.log({
