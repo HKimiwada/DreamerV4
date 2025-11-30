@@ -1,5 +1,5 @@
-# Training script v2 (v01+ but for long frames aprox. 30 seconds, implements sliding window training)
-# python training_script/world_model/long_frames/train_world_model_v2.py
+# Training script v3 (v2 but more robust training regime)
+# python training_script/world_model/long_frames/train_world_model_v3.py
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -7,6 +7,7 @@ import wandb
 import numpy as np
 from pathlib import Path
 from torch.utils.data import DataLoader
+from torch.amp import GradScaler, autocast
 
 from tokenizer.model.encoder_decoder import CausalTokenizer
 from tokenizer.patchify_mask import Patchifier
@@ -183,6 +184,14 @@ def visualize_world_model(world_model, data_builder, sample, tokenizer, step, de
     
     world_model.train()
 
+def get_warmup_cosine_schedule(optimizer, warmup_steps, total_steps, min_lr=1e-6):
+    def lr_lambda(current_step):
+        if current_step < warmup_steps:
+            return float(current_step) / float(max(1, warmup_steps))
+        progress = float(current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+        return max(min_lr, 0.5 * (1.0 + np.cos(np.pi * progress)))
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
 def train_overfit():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
@@ -229,31 +238,45 @@ def train_overfit():
 
     params = list(world_model.parameters()) + list(data_builder.parameters())
     
-    optimizer = torch.optim.AdamW(params, lr=2e-4, weight_decay=1e-2)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10000, eta_min=1e-6)
+    # 1. Zero weight decay for overfitting
+    optimizer = torch.optim.AdamW(params, lr=3e-4, weight_decay=0.0)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100000, eta_min=1e-6)
+
+    global_step = 0
+    MAX_STEPS = 100000
+
+    # 2. Warmup Scheduler
+    scheduler = get_warmup_cosine_schedule(
+        optimizer, 
+        warmup_steps=2000, 
+        total_steps=MAX_STEPS
+    )
+    
+    # 3. Mixed Precision Scaler
+    scaler = GradScaler() 
 
     wandb.init(
-        project="worldmodel-v2-overfit",
+        project="worldmodel-v2-long-overfit",
         config={
             "d_model": d_model,
             "d_latent": d_latent,
             "layers": 12,
             "heads": 8,
-            "mode": "overfit",
-            "loss": "flow_match_x_pred"
+            "mode": "overfit_long",
+            "loss": "flow_match_v2",
+            "max_steps": MAX_STEPS,
+            "weight_decay": 0.0,
+            "window_size": 64
         }
     )
 
-    print("Starting long frames training...")
+    print(f"Starting extended training for {MAX_STEPS} steps...")
     world_model.train()
     data_builder.train()
 
-    global_step = 0
-    MAX_STEPS = 10000
-
     # Config for Sliding Window
-    WINDOW_SIZE = 32  # How many frames the model sees at once
-    STRIDE = 16       # How far to slide (overlap = 32 - 16 = 16 frames)
+    WINDOW_SIZE = 64  # How many frames the model sees at once
+    STRIDE = 32       # How far to slide (overlap = 32 - 16 = 16 frames)
 
     while global_step < MAX_STEPS:
         for sample in loader:
@@ -281,31 +304,33 @@ def train_overfit():
                     # Handle tensors that might be (B, T) or (B, T, ...)
                     # We always slice the time dimension (dim=1)
                     actions_chunk[k] = v[:, start_idx:end_idx]
+
+                # 2. Forward (with AMP)
+                with autocast(device_type=device, dtype=torch.float16):
+                    wm_input = data_builder(latents_chunk, actions_chunk)
+                    
+                    # Pass time_offset!
+                    pred_z_clean = world_model(wm_input, time_offset=start_idx)
+
+                    loss = flow_loss_v2(
+                        pred_z_clean,
+                        wm_input["z_clean"], 
+                        wm_input["tau"],
+                        ramp_weight=True
+                    )
                 
-                # 3. Build input tokens (Noise is sampled specifically for this 32-frame chunk)
-                wm_input = data_builder(latents_chunk, actions_chunk)
-
-                # 4. Forward pass: Predict Clean Latents
-                # Pass time_offset so model knows this is frame #start_idx, not #0
-                pred_z_clean = world_model(wm_input, time_offset=start_idx)
-
-                # 5. Loss: Compare prediction against the CHUNK ground truth
-                loss = flow_loss_v2(
-                    pred_z_clean,
-                    wm_input["z_clean"], 
-                    wm_input["tau"],
-                    ramp_weight=True
-                )
-
-                # 6. Update
+                # 3. Update (with Scaler)
                 optimizer.zero_grad()
-                loss.backward()
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer) # Unscale before clip
                 torch.nn.utils.clip_grad_norm_(params, max_norm=1.0)
-                optimizer.step()
+                scaler.step(optimizer)
+                scaler.update()
+                
                 scheduler.step()
                 
                 global_step += 1
-
+            
                 # Log
                 if global_step % 10 == 0:
                     wandb.log({

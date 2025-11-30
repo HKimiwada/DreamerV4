@@ -31,9 +31,10 @@ class WorldModel(nn.Module):
         d_latent: int,
         num_layers: int,
         num_heads: int,
-        clip_length: int = 8, # Clip length of input video
+        clip_length: int = 600, # Clip length of input video
         n_total: int = 461, # Total number of wm_input_tokens (corupted_latent + action_token + register_token + shortcut_token)
         n_latents: int = 448, # Total number of latent tokens (from tokenizer training configs)
+        use_checkpoint: bool = True 
     ):
         super().__init__()
         self.n_total = n_total
@@ -42,6 +43,7 @@ class WorldModel(nn.Module):
         self.d_latent = d_latent
         self.time_embed = nn.Embedding(clip_length, d_model)  # Temporal positional embedding
         self.slot_embed = nn.Embedding(n_total, d_model) # Token-type positional embedding
+        self.use_checkpoint = use_checkpoint
         
         transformer_blocks = []
         for i in range(num_layers):
@@ -51,7 +53,7 @@ class WorldModel(nn.Module):
         self.final_norm = RMSNorm(d_model)
         self.output_head = nn.Linear(d_model, d_latent)
         
-    def forward(self, data_input_wm): # data_input_wm is the raw output from DataBuilderWM
+    def forward(self, data_input_wm, time_offset=0): # data_input_wm is the raw output from DataBuilderWM
         wm_input_tokens = data_input_wm["wm_input_tokens"]
         # Handle unbatched vs batched 
         unbatched = (wm_input_tokens.dim() == 2)
@@ -67,8 +69,8 @@ class WorldModel(nn.Module):
         
         # Positional Encoding
         # time index: 0..T-1
-        t_idx = torch.arange(T, device=x.device)          # (T,)
-        time_emb = self.time_embed(t_idx)                 # (T, D) -> Creating embedding for particular timestamp
+        t_idx = torch.arange(start=time_offset, end=time_offset + T, device=x.device) 
+        time_emb = self.time_embed(t_idx) # (T, D) -> Creating embedding for particular timestamp
 
         # slot index: 0..N_total-1
         s_idx = torch.arange(N_total, device=x.device)    # (N_total,)
@@ -84,7 +86,13 @@ class WorldModel(nn.Module):
 
         # Transformer blocks
         for block in self.transformer_blocks:
-            x = block(x, T, N_total)
+            if self.use_checkpoint and self.training:
+                x = checkpoint.checkpoint(
+                    block, x, T, N_total, 
+                    use_reentrant=False 
+                )
+            else:
+                x = block(x, T, N_total)
 
         # RMS Normalization
         x = self.final_norm(x)
