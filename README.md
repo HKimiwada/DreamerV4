@@ -9,9 +9,9 @@ Trained on 8x 16GB V100 GPUs using data from zhwang4ai/OpenAI-Minecraft-Contract
 ## Results
 ### Tokenizer Performance
 Example #1: Reconstruction from Tokenizer
-<video src="/inference/results/tokenizer/reconstructed_output.mp4" controls="true" width="600"></video>
+https://github.com/user-attachments/assets/1bb7deb3-aaa0-4f28-abaf-b1ccf875d183
 
 Example #2: Reconstruction from Tokenizer
-<video src="/inference/results/tokenizer/v2_reconstructed_output.mp4" controls="true" width="600"></video>
+https://github.com/user-attachments/assets/2a936c75-4fa1-49be-9aa1-11f7a0f476af
 
 ### World Model Performance
