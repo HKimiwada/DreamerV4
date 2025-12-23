@@ -275,7 +275,7 @@ def main():
     video_frames = generate_video_flow_matching(cfg, wm, db, tokenizer, raw_actions)
     
     # 4. Save
-    save_path = cfg.output_dir / "inference_result_600_frames.mp4"
+    save_path = cfg.output_dir / "latest_multistep.mp4"
     save_video(video_frames, save_path)
 
 if __name__ == "__main__":

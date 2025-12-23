@@ -1,4 +1,4 @@
-# CUDA_VISIBLE_DEVICES=3 python inference/world_model_inference_singlestep.py
+# CUDA_VISIBLE_DEVICES=2 python inference/world_model_inference_singlestep.py
 import torch
 import torch.nn as nn
 import numpy as np
@@ -184,7 +184,7 @@ def main():
 
     # RUN ONE-STEP TEST
     video_frames = generate_one_step_denoise(cfg, wm, db, tokenizer, raw_actions)
-    save_video(video_frames, cfg.output_dir / "tau_zero_result.mp4")
+    save_video(video_frames, cfg.output_dir / "latest_singlestep.mp4")
 
 if __name__ == "__main__":
     main()

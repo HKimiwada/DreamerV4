@@ -6,3 +6,4 @@ wandb/
 checkpoints/
 logs/
 visualizations/
+imagination_training/mineworld
